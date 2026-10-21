@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import subprocess
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -25,10 +26,6 @@ STILL_GPU, TAKE_GPU = "L40S", "L4"
 SEEDS = (1, 2, 3)
 IN_POINT = 0.5
 MAX_ROUND = 2
-
-
-class RoundLimit(RuntimeError):
-    pass
 
 
 class OverBudget(RuntimeError):
@@ -75,6 +72,7 @@ class TakePlan:
     kf_path: Path | None = None
     keys: list[tuple[str, int]] = field(default_factory=list)  # (key, seed) for the round
     todo: list[tuple[str, int]] = field(default_factory=list)  # the keys not done yet
+    gen: int = 1
 
 
 def _h(key: str) -> str:
@@ -89,6 +87,13 @@ def pick_ok(led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
 
 
 def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | None, pick: dict | None) -> TakePlan:
+    """Next takes for a shot. The 2-round cap is per pick lineage ("gen", R5), read from the current gen's take rows:
+
+    - the current prompt+keyframe hash matches the latest round's rows and that round was not rejected: resume that round;
+    - that round was rejected: next round of the same gen (any edit made after a rejection is the rewrite);
+      round 2 with an unchanged hash is "edit" (not_rewritten), past round 2 is "limit";
+    - otherwise the shot changed (brief, shot or keyframe edit) without a rejection: a fresh gen at round 1.
+    """
     if kf_need(p, shot, brief, entry) != "done":
         return TakePlan("run", missing=len(SEEDS))
     prompt, kf_path = compose(shot, brief), p.root / entry["path"]
@@ -96,20 +101,25 @@ def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | N
     if pick_ok(led, pick, prompt, kf):
         return TakePlan("done")
     rows = [r for r in led.rows() if r.get("kind") == "job" and r.get("shot") == shot.id and r.get("model") == TAKE_MODEL]
-    h = job_key(shot.id, 0, prompt, kf).rsplit("-", 1)[1]
-    r = max((x["round"] for x in rows), default=1)
-    same = any(x["round"] == r and _h(x["key"]) == h for x in rows)
-    rejected = bool(pick and pick.get("rejected") and pick["round"] == r)
-    if rows and (rejected or not same):  # otherwise resume the unfinished round
+    h = _h(job_key(shot.id, 0, prompt, kf))
+    g = max((x["gen"] for x in rows), default=1)
+    cur = [x for x in rows if x["gen"] == g]
+    r = max((x["round"] for x in cur), default=1)
+    same = any(x["round"] == r and _h(x["key"]) == h for x in cur)
+    rejected = bool(pick and pick.get("rejected") and pick.get("gen", g) == g and pick["round"] == r)
+    if rejected:
         r += 1
-    plan = TakePlan("run", 0, r, prompt, kf, kf_path)
+    elif cur and not same:
+        g, r = g + 1, 1
+    plan = TakePlan("run", 0, r, prompt, kf, kf_path, gen=g)
     if r > MAX_ROUND:
         plan.need = "limit"
-    elif r > 1 and h in {_h(x["key"]) for x in rows if x["round"] < r}:  # not_rewritten, from paper-machine direct.py
+    elif r > 1 and h in {_h(x["key"]) for x in cur if x["round"] < r}:  # not_rewritten, from paper-machine direct.py
         plan.need = "edit"
     else:
-        plan.keys = [(job_key(shot.id, r * 100 + n, prompt, kf), r * 100 + n) for n in SEEDS]
-        plan.todo = [(k, s) for k, s in plan.keys if not led.done(k)]
+        seeds = [g * 1000 + r * 100 + n for n in SEEDS]  # unique across gens and rounds
+        plan.keys = [(job_key(shot.id, sd, prompt, kf), sd) for sd in seeds]
+        plan.todo = [(k, sd) for k, sd in plan.keys if not led.done(k)]
         plan.need, plan.missing = ("run", len(plan.todo)) if plan.todo else ("judge", 0)
     return plan
 
@@ -177,18 +187,26 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
         if not led.can_afford(cost(len(jobs), EST_STILL_S, STILL_GPU)):
             raise OverBudget(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
-        for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
-            row = {"key": job_key(s.id, seed, pr, b""), "shot": s.id, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
-            if isinstance(res, BaseException):
-                log.error("keyframe %s failed: %r", s.id, res)
-                led.append(_row(**row, keyframe="", output=None, gpu=STILL_GPU, wall_s=EST_STILL_S, failed=True, error=repr(res)))
-                failed.append(s)
-                continue
-            dest = p.keys_dir / f"{s.id}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
-            _write_bytes(dest, res["png"])
-            led.append(_row(**row, keyframe="", output=str(dest.resolve()), gpu=res["gpu"], wall_s=res["wall_s"]))
-            kfs[s.id] = {"path": str(dest.relative_to(p.root)), "seed": seed, "prompt_sha": sha12(pr), "approved": approved, "note": note}
-    write_json(p.keyframes_path, kfs)
+        try:
+            for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
+                row = {"key": job_key(s.id, seed, pr, b""), "shot": s.id, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
+                if isinstance(res, BaseException):
+                    log.error("keyframe %s failed: %r", s.id, res)
+                    led.append(_row(**row, keyframe="", output=None, gpu=STILL_GPU, wall_s=EST_STILL_S, failed=True, error=repr(res)))
+                    failed.append(s)
+                    continue
+                dest = p.keys_dir / f"{s.id}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
+                _write_bytes(dest, res["png"])
+                led.append(_row(**row, keyframe="", output=str(dest.resolve()), gpu=res["gpu"], wall_s=res["wall_s"]))
+                kfs[s.id] = {
+                    "path": str(dest.relative_to(p.root)),
+                    "seed": seed,
+                    "prompt_sha": sha12(pr),
+                    "approved": approved,
+                    "note": note,
+                }
+        finally:
+            write_json(p.keyframes_path, kfs)  # finished stills stay recorded even if a later one breaks the loop
     return failed
 
 
@@ -215,9 +233,26 @@ def run_keyframes(run: Run) -> None:
             write_json(p.keyframes_path, kfs)
 
 
+def sheet(p: Project, key: str) -> Path | None:
+    """The take's contact sheet, built on demand. None (logged) when the clip is unreadable: that take is never judged."""
+    dest = p.sheets_dir / f"{key}.jpg"
+    if dest.exists():
+        return dest
+    tmp = dest.with_name(f"{key}.tmp.jpg")
+    try:
+        contact_sheet(p.takes_dir / f"{key}.mp4", tmp)
+    except subprocess.CalledProcessError as e:
+        log.error("take %s is unusable, no contact sheet: %s", key, e)
+        tmp.unlink(missing_ok=True)
+        return None
+    os.replace(tmp, dest)
+    return dest
+
+
 def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]]) -> None:
-    """Paper-machine's pattern: file first then its ledger row, failures billed at EST_WALL_S, overhead row in finally."""
-    p, led = run.p, run.led
+    """Paper-machine's pattern: file first then its ledger row, failures billed at EST_WALL_S, overhead row in finally.
+    Sheets come after every file and row is written, so one bad clip never loses the rest of the batch."""
+    p, led, written = run.p, run.led, []
     p.takes_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU)):  # +1 reserves the run's container load
@@ -226,7 +261,7 @@ def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]]) -> None:
         try:
             results = run.generator().clips([ClipJob(s.id, key, pl.prompt, seed, pl.kf) for s, key, seed, pl in jobs])
             for (s, key, seed, pl), res in zip(jobs, results, strict=True):
-                row = {"key": key, "shot": s.id, "round": pl.round, "seed": seed, "model": TAKE_MODEL, "prompt": pl.prompt}
+                row = {"key": key, "shot": s.id, "gen": pl.gen, "round": pl.round, "seed": seed, "model": TAKE_MODEL, "prompt": pl.prompt}
                 row["keyframe"] = str(pl.kf_path.resolve())
                 if isinstance(res, BaseException):
                     log.error("take %s failed: %r", key, res)
@@ -236,10 +271,12 @@ def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]]) -> None:
                 _write_bytes(dest, res["mp4"])
                 led.append(_row(**row, output=str(dest), gpu=res["gpu"], wall_s=res["wall_s"]))
                 in_call += res["wall_s"]
-                contact_sheet(dest, p.sheets_dir / f"{key}.jpg")
+                written.append(key)
         finally:
-            led.append(_row(key=f"run-{int(t0)}", shot="", round=0, seed=0, model=OVERHEAD_MODEL, gpu=TAKE_GPU, prompt="", keyframe="",
-                            output=None, wall_s=max(0.0, time.monotonic() - t0 - in_call)))  # fmt: skip
+            led.append(_row(key=f"run-{int(t0)}", shot="", gen=0, round=0, seed=0, model=OVERHEAD_MODEL, gpu=TAKE_GPU, prompt="",
+                            keyframe="", output=None, wall_s=max(0.0, time.monotonic() - t0 - in_call)))  # fmt: skip
+    for key in written:
+        sheet(p, key)
 
 
 def _plans(run: Run) -> tuple[Brief, list[Shot], dict, dict[str, TakePlan]]:
@@ -251,25 +288,31 @@ def _plans(run: Run) -> tuple[Brief, list[Shot], dict, dict[str, TakePlan]]:
 def _rewrite_rejected(run: Run) -> bool:
     """Auto: rewrite every shot whose rejected round is unchanged; its keyframe goes stale, so advance loops back."""
     brief, shots, picks, plans = _plans(run)
-    edits = [s for s in shots if plans[s.id].need == "edit"]
-    for s in edits:
-        new = auto.rewrite_shot(run.chat("takes", "text"), s, brief, picks.get(s.id, {}).get("reason", ""))
-        shots = [new if x.id == s.id else x for x in shots]
-        run.p.save_shots(shots, shots_inputs(run.p, brief))
-    return bool(edits)
+    edits = {s.id for s in shots if plans[s.id].need == "edit"}
+    if not edits:
+        return False
+    out = []
+    for s in shots:
+        if s.id in edits:
+            new = auto.rewrite_shot(run.chat("takes", "text"), s, brief, picks.get(s.id, {}).get("reason", ""))
+            if new == s:
+                raise auto.AutoError(f"rewrite produced the same shot ({s.id})")
+            s = new
+        out.append(s)
+    run.p.save_shots(out, shots_inputs(run.p, brief))
+    return True
 
 
 def run_takes(run: Run) -> None:
     p = run.p
     auto_mode = p.modes["takes"] == "auto"
     vision = run.chat("takes", "vision") if auto_mode else None
-    _, _, _, plans = _plans(run)
-    for sid, pl in plans.items():
-        if pl.need == "limit":
-            raise RoundLimit(f"{sid}: round {pl.round} refused; a shot gets at most {MAX_ROUND} judged rounds")
     if auto_mode and _rewrite_rejected(run):
         return
     brief, shots, picks, plans = _plans(run)
+    for s in shots:
+        if plans[s.id].need == "limit":  # R6: per shot; the rest still run
+            log.warning("%s: round %d refused; pick a round-2 take", s.id, plans[s.id].round)
     jobs = [(s, k, seed, plans[s.id]) for s in shots if plans[s.id].need == "run" for k, seed in plans[s.id].todo]
     if jobs:
         _run_takes(run, jobs)
@@ -280,16 +323,23 @@ def run_takes(run: Run) -> None:
         pl = plans[s.id]
         if pl.need != "judge":
             continue
-        sheets = [p.sheets_dir / f"{k}.jpg" for k, _ in pl.keys]
-        for (k, _), sh in zip(pl.keys, sheets):
-            if not sh.exists():
-                contact_sheet(p.takes_dir / f"{k}.mp4", sh)
-        idx, why = auto.pick_take(vision, s, brief, sheets, must_pick=pl.round == MAX_ROUND)
+        usable = [(k, sh) for k, _ in pl.keys if (sh := sheet(p, k))]
+        if not usable:
+            log.error("%s: no usable take in gen %d round %d", s.id, pl.gen, pl.round)
+            continue
+        idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == MAX_ROUND)
         if idx is None:
-            picks[s.id] = {"rejected": True, "round": pl.round, "reason": why}
+            picks[s.id] = {"rejected": True, "gen": pl.gen, "round": pl.round, "reason": why}
         else:
-            key = pl.keys[idx][0]
-            picks[s.id] = {"key": key, "clip": f"{p.takes_dir.name}/{key}.mp4", "in": IN_POINT, "round": pl.round, "quick": False}
+            key = usable[idx][0]
+            picks[s.id] = {
+                "key": key,
+                "clip": f"{p.takes_dir.name}/{key}.mp4",
+                "in": IN_POINT,
+                "gen": pl.gen,
+                "round": pl.round,
+                "quick": False,
+            }
         write_json(p.picks_path, picks)
     _rewrite_rejected(run)
 
@@ -312,9 +362,12 @@ def write_report(p: Project, led: Ledger) -> None:
     lines = ["# Report", "", f"Decided by: brief {m['brief']}, shots {m['shots']}, keyframes {m['keyframes']}, takes {m['takes']}.", ""]
     for s in shots:
         pk, fails = picks.get(s.id, {}), sum(1 for r in jobs if r["shot"] == s.id and r.get("failed"))
+        takes = [r for r in jobs if r["shot"] == s.id and r.get("model") == TAKE_MODEL]
+        g = max((r["gen"] for r in takes), default=0)
+        rounds = sorted({r["round"] for r in takes if r["gen"] == g}) or "-"
         pick = f"`{pk['key']}`" + (" (quick)" if pk.get("quick") else "") if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
-        lines.append(f"- **{s.id}**: rounds {led.rounds(s.id) or '-'}; pick {pick}; failures {fails}; keyframe note: {note}")
+        lines.append(f"- **{s.id}**: gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
     lines += ["", f"Spend: ${led.spent_usd():.2f} of ${p.cap_usd:.2f} cap (ledger estimate; the Modal dashboard is the true spend).", ""]
     (p.out_dir / "report.md").write_text("\n".join(lines))
 

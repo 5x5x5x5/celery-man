@@ -7,10 +7,10 @@ import pytest
 
 from celery_man.assemble import probe_duration
 from celery_man.generate import FakeGenerator
-from celery_man.ledger import Ledger
+from celery_man.ledger import GPU_PRICE, Ledger
 from celery_man.pipeline import advance, estimate, status
 from celery_man.project import Brief, CastMember, Place, Project, Shot, read_json, sha12, write_json
-from celery_man.steps import RoundLimit
+from celery_man.steps import EST_STILL_S, EST_WALL_S
 from celery_man.timing import plan_windows
 
 ALL_AUTO = {"brief": "auto", "shots": "auto", "keyframes": "auto", "takes": "auto"}
@@ -26,9 +26,9 @@ BRIEF = {
 class CountingGen(FakeGenerator):
     """FakeGenerator that counts jobs, fails clips (only) for chosen shots, and renders one clip it then reuses."""
 
-    def __init__(self, fail_clips=()):
+    def __init__(self, fail_clips=(), junk=()):
         super().__init__()
-        self.fail_clips, self.stills_n, self.clips_n, self._clip = set(fail_clips), [], [], None
+        self.fail_clips, self.junk, self.stills_n, self.clips_n, self._clip = set(fail_clips), set(junk), [], [], None
 
     def stills(self, jobs):
         self.stills_n += [j.shot_id for j in jobs]
@@ -40,6 +40,10 @@ class CountingGen(FakeGenerator):
         for j in jobs:
             if j.shot_id in self.fail_clips:
                 out.append(RuntimeError("boom"))
+                continue
+            if j.key in self.junk or j.shot_id in self.junk:
+                self.junk.discard(j.shot_id)  # a shot id junks only its first take
+                out.append({"mp4": b"not an mp4", "wall_s": 1.0, "gpu": "L4"})
                 continue
             self._clip = self._clip or super().clips([j])[0]
             out.append(dict(self._clip))
@@ -61,10 +65,13 @@ def vision_chat(reject=()):
     def chat(system, user, images):
         if "keyframe image" in system:
             return '{"ok": true, "why": "fine"}'
+        m = re.search(r"walks s\d+|stands", user)
+        chat.judged.append((m[0] if m else "", "must pick one" in system, len(images)))
         if any(f"a person walks {s}" in user for s in reject) and "must pick one" not in system:
             return '{"pick": null, "why": "morphing"}'
         return '{"pick": 0, "why": "steady"}'
 
+    chat.judged = []
     return chat
 
 
@@ -98,8 +105,12 @@ def states(sts):
     return {s.step: s.state for s in sts}
 
 
-def run_auto(p, gen=None, reject=()):
-    return advance(p, gen or CountingGen(), chat_text=text_chat, chat_vision=vision_chat(reject))
+def run_auto(p, gen=None, reject=(), vision=None):
+    return advance(p, gen or CountingGen(), chat_text=text_chat, chat_vision=vision or vision_chat(reject))
+
+
+def take_rows(p, shot):
+    return [r for r in Ledger(p.ledger_path).rows() if r.get("kind") == "job" and r["shot"] == shot and r["model"] == "ltx-2.5-draft"]
 
 
 def test_all_auto_runs_to_video(tmp_path, song):
@@ -151,10 +162,26 @@ def test_editing_brief_marks_everything_stale_without_running(tmp_path, song):
     st = states(status(p))
     assert (st["brief"], st["shots"], st["keyframes"], st["takes"]) == ("done", "done", "stale", "stale")
     assert estimate(p) > 0
-    gen = CountingGen()
-    run_auto(p, gen)
+    gen, vision = CountingGen(), vision_chat()
+    run_auto(p, gen, vision=vision)
     assert len(gen.stills_n) == 8 and len(gen.clips_n) == 24
     assert set(states(status(p)).values()) == {"done"}
+    assert {(r["gen"], r["round"]) for r in take_rows(p, "s01")} == {(1, 1), (2, 1)}
+    assert read_json(p.picks_path)["s01"]["gen"] == 2
+    assert len(vision.judged) == 8 and not any(must for _, must, _ in vision.judged)
+
+
+def test_brief_edit_after_two_rounds_starts_a_fresh_lineage(tmp_path, song):
+    p = make(tmp_path, song)
+    run_auto(p, reject={"s01"})
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2]
+    b = p.load_brief()
+    b.style["palette"] = "sepia"
+    p.save_brief(b, sha12("a seed"))
+    gen = CountingGen()
+    assert set(states(run_auto(p, gen)).values()) == {"done"}
+    assert gen.clips_n.count("s01") == 3
+    assert read_json(p.picks_path)["s01"]["gen"] == 2 and read_json(p.picks_path)["s01"]["round"] == 1
 
 
 def test_rerun_reuses_finished_takes(tmp_path, song):
@@ -182,13 +209,48 @@ def test_auto_reject_rewrites_then_round_two_must_pick(tmp_path, song):
     assert gen.stills_n.count("s01") == 2 and gen.clips_n.count("s01") == 6
 
 
-def test_round_three_refused(tmp_path, song):
+def test_round_limit_is_per_shot(tmp_path, song):
     p = make(tmp_path, song)
-    run_auto(p, reject={"s01"})
+    run_auto(p, CountingGen(fail_clips={"s02"}), reject={"s01"})
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and "s02" not in read_json(p.picks_path)
     picks = read_json(p.picks_path)
-    picks["s01"] = {"rejected": True, "round": 2, "reason": "still bad"}
+    picks["s01"] = {"rejected": True, "gen": 1, "round": 2, "reason": "still bad"}
     write_json(p.picks_path, picks)
     gen = CountingGen()
-    with pytest.raises(RoundLimit, match="s01"):
-        run_auto(p, gen)
-    assert gen.clips_n == []
+    sts = {s.step: s for s in run_auto(p, gen)}
+    assert "s01" not in gen.clips_n and gen.clips_n == ["s02"] * 3
+    assert sts["takes"].state == "waiting" and sts["takes"].detail == "s01: pick a round-2 take"
+    assert "s02" in read_json(p.picks_path)
+
+
+def test_one_junk_clip_keeps_the_rest_of_the_batch(tmp_path, song):
+    p = make(tmp_path, song)
+    vision = vision_chat()
+    sts = run_auto(p, CountingGen(junk={"s02"}), vision=vision)
+    assert set(states(sts).values()) == {"done"}
+    rows = [r for r in Ledger(p.ledger_path).rows() if r.get("model") == "ltx-2.5-draft"]
+    assert len(rows) == 24 and all(r["output"] for r in rows)
+    assert ("walks s02", False, 2) in vision.judged  # the junk take is never shown to the judge
+
+
+def test_rewrite_to_the_same_shot_raises(tmp_path, song):
+    from celery_man.auto import AutoError
+
+    def lazy_text(system, user, images):
+        if "simplify one shot" in system:
+            return json.dumps({"action": "a person walks s01", "cast": ["A"], "place": "P", "framing": "wide shot"})
+        return text_chat(system, user, images)
+
+    p = make(tmp_path, song)
+    with pytest.raises(AutoError, match="same shot"):
+        advance(p, CountingGen(), chat_text=lazy_text, chat_vision=vision_chat({"s01"}))
+
+
+def test_estimate_fresh_project_matches_formula(tmp_path, song):
+    p = make(tmp_path, song, modes={"brief": "tastemaker", "shots": "tastemaker", "keyframes": "auto", "takes": "auto"})
+    brief = Brief("l", BRIEF["style"], [CastMember("A", "a tall person")], [Place("P", "a room")], [])
+    p.save_brief(brief, sha12("a seed"))
+    windows = plan_windows(read_json(p.timing_path), 0, 32)
+    p.save_shots([Shot(f"s{i:02d}", a, b, s, "a person walks", ["A"], "P", "wide shot") for i, (a, b, s) in enumerate(windows, 1)], "x")
+    n = 8
+    assert estimate(p) == pytest.approx(n * EST_STILL_S * GPU_PRICE["L40S"] + (n * 3 + 1) * EST_WALL_S * GPU_PRICE["L4"])

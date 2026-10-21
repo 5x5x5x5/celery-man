@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from celery_man import steps
+from celery_man.auto import ChatFn
 from celery_man.generate import Generator
 from celery_man.ledger import Ledger, cost
 from celery_man.project import Project, read_json
@@ -37,11 +38,12 @@ def _decision(p: Project, step: str, fresh: bool | None) -> StepState:
 
 
 def _per_shot(p: Project, step: str, needs: dict[str, str], wait_on: set[str], have_file: bool) -> StepState:
+    """wait_on: needs only a person can clear in tastemaker mode; "limit" waits in either mode (R6)."""
     open_ = {sid: n for sid, n in needs.items() if n != "done"}
-    detail = ", ".join(f"{sid} {n}" for sid, n in open_.items())
+    detail = ", ".join(f"{sid}: pick a round-2 take" if n == "limit" else f"{sid} {n}" for sid, n in open_.items())
     if not open_:
         return StepState(step, "done")
-    if p.modes[step] == "tastemaker" and set(open_.values()) <= wait_on:
+    if set(open_.values()) <= ({"limit"} | (wait_on if p.modes[step] == "tastemaker" else set())):
         return StepState(step, "waiting", detail)
     return StepState(step, "stale" if have_file else "missing", detail)
 
@@ -82,7 +84,7 @@ def estimate(p: Project) -> float:
     return cost(n_kf, steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 
 
-def advance(p: Project, gen: Generator, chat_text=None, chat_vision=None) -> list[StepState]:
+def advance(p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vision: ChatFn | None = None) -> list[StepState]:
     """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish."""
     run = steps.Run(p, gen, chat_text, chat_vision)
     with run.stack:
