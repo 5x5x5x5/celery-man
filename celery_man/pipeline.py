@@ -1,13 +1,17 @@
 """Pipeline: hash-stamped decisions, per-step staleness, and advance in either mode."""
 
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from celery_man import steps, takes
+from celery_man.assemble import assemble
 from celery_man.auto import ChatFn
 from celery_man.generate import Generator
 from celery_man.ledger import Ledger, cost
-from celery_man.project import Project, read_json
+from celery_man.project import Brief, Project, Shot, read_json, write_json
+from celery_man.steps import BudgetError
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +25,15 @@ RUNNERS = {
     "assemble": steps.run_assemble,
 }
 MAX_PASSES = 20
+SPENDING = ("keyframes", "takes")
+
+
+class WaitingError(RuntimeError):
+    """quick() needs a tastemaker decision (brief or shots) that is missing or stale (R4; the CLI exits 2)."""
+
+    def __init__(self, step: str) -> None:
+        super().__init__(f"waiting on the {step} decision")
+        self.step = step
 
 
 @dataclass
@@ -84,16 +97,69 @@ def estimate(p: Project) -> float:
     return cost(n_kf, steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 
 
+def _quick_price(p: Project, led: Ledger, shots: list[Shot], brief: Brief, kfs: dict) -> float:
+    """Only what a quick pass would actually generate: missing/stale stills, takes not in the ledger, one load if any take."""
+    stills = {s.id for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen"}
+    n_takes = sum(s.id in stills or not led.done(takes.quick_key(p, s, brief, kfs[s.id])) for s in shots)
+    return cost(len(stills), steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
+
+
+def quick_cost(p: Project) -> float:
+    """USD for a quick pass over the shots that have no valid pick: the floor every advance must be able to pay."""
+    brief, shots = p.load_brief(), p.load_shots()
+    if brief is None or not shots:
+        return 0.0
+    kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
+    open_ = [s for s in shots if takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need != "done"]
+    return _quick_price(p, led, open_, brief, kfs)
+
+
+def _preflight(p: Project, led: Ledger, need: float) -> None:
+    if need and led.spent_usd() + need > p.cap_usd:
+        raise BudgetError(f"a quick pass over the range needs ${need:.2f}, ${p.cap_usd - led.spent_usd():.2f} left")
+
+
+def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None) -> Path:
+    """Test mode (R3): one unreviewed seed-1 take per shot, cut to out/quick.mp4. Never writes picks.json; keyframe and
+    take modes are ignored, but its stills land in keyframes.json unapproved (note "quick") so a judged run reviews them."""
+    run = steps.Run(p, gen, chat_text)
+    with run.stack:
+        for i, step in enumerate(STEPS[:3]):
+            st = status(p)[i]
+            if st.state == "waiting":
+                raise WaitingError(step)
+            if st.state != "done":
+                RUNNERS[step](run)
+        brief, shots, kfs = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}
+        _preflight(p, run.led, _quick_price(p, run.led, shots, brief, kfs))
+        regen = [(s, steps.QUICK_SEED) for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
+        failed = {s.id for s in steps._stills(run, kfs, regen, brief, approved=None, note="quick")}
+        keys = takes.quick_takes(run, [s for s in shots if s.id not in failed], brief, kfs)
+    if missing := [s.id for s in shots if s.id not in keys]:
+        raise RuntimeError(f"quick: no take for {', '.join(missing)}; rerun to retry them")
+    timeline = [{"shot": s.id, "key": keys[s.id], "clip": f"{p.takes_dir.name}/{keys[s.id]}.mp4", "in": steps.IN_POINT,
+                 "start": s.start, "end": s.end} for s in shots]  # fmt: skip
+    p.out_dir.mkdir(exist_ok=True)
+    write_json(p.out_dir / "quick_timeline.json", timeline)
+    tmp, dest = p.out_dir / "quick.tmp.mp4", p.out_dir / "quick.mp4"
+    assemble([{"clip": str(p.root / c["clip"]), "in": c["in"], "start": c["start"], "end": c["end"]} for c in timeline], p.song, tmp)
+    os.replace(tmp, dest)
+    return dest
+
+
 def advance(p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vision: ChatFn | None = None) -> list[StepState]:
     """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish."""
     run = steps.Run(p, gen, chat_text, chat_vision)
     with run.stack:
-        sts = status(p)
+        sts, checked = status(p), False
         for _ in range(MAX_PASSES):
             i = next((i for i, s in enumerate(sts) if s.state != "done"), None)
             if i is None or sts[i].state == "waiting":
                 return sts
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
+            if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
+                checked = True
+                _preflight(p, run.led, quick_cost(p))
             RUNNERS[sts[i].step](run)
             sts = status(p)
             # stop on failures instead of retrying (and re-billing) in the same call; an upstream step going stale is progress

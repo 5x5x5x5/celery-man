@@ -25,10 +25,11 @@ STILL_GPU, TAKE_GPU = "L40S", "L4"
 SEEDS = (1, 2, 3)
 IN_POINT = 0.5
 MAX_ROUND = 2
+QUICK_MODEL, QUICK_SEED = "quick", 1
 
 
-class OverBudget(RuntimeError):
-    """Raised before spending past the cap. Task 9 turns this into the quick-take fallback."""
+class BudgetError(RuntimeError):
+    """Raised instead of spending past the cap: by the preflight, or when even the quick fallback no longer fits."""
 
 
 # --- decision stamps -------------------------------------------------------------------------------
@@ -122,7 +123,7 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
     p.keys_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs), EST_STILL_S, STILL_GPU)):
-            raise OverBudget(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
+            raise BudgetError(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
         try:
             for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
@@ -194,6 +195,8 @@ def write_report(p: Project, led: Ledger) -> None:
         pick = f"`{pk['key']}`" + (" (quick)" if pk.get("quick") else "") if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
         lines.append(f"- **{s.id}**: gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
+    if fell_back := [s.id for s in shots if picks.get(s.id, {}).get("quick")]:
+        lines += ["", "## Quick fallback (cap reached)", "", "One unreviewed quick take each: " + ", ".join(fell_back)]
     lines += ["", f"Spend: ${led.spent_usd():.2f} of ${p.cap_usd:.2f} cap (ledger estimate; the Modal dashboard is the true spend).", ""]
     (p.out_dir / "report.md").write_text("\n".join(lines))
 

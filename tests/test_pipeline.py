@@ -1,7 +1,6 @@
 import hashlib
 import json
 import re
-import subprocess
 
 import pytest
 
@@ -73,13 +72,6 @@ def vision_chat(reject=()):
 
     chat.judged = []
     return chat
-
-
-@pytest.fixture
-def song(tmp_path_factory):
-    path = tmp_path_factory.mktemp("song") / "song.wav"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=40", str(path)], check=True)
-    return path
 
 
 def make(tmp_path, song, modes=ALL_AUTO) -> Project:

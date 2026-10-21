@@ -18,10 +18,12 @@ from celery_man.steps import (
     IN_POINT,
     MAX_ROUND,
     OVERHEAD_MODEL,
+    QUICK_MODEL,
+    QUICK_SEED,
     SEEDS,
     TAKE_GPU,
     TAKE_MODEL,
-    OverBudget,
+    BudgetError,
     Run,
     _row,
     _write_bytes,
@@ -110,19 +112,19 @@ def sheet(p: Project, key: str) -> Path | None:
     return dest
 
 
-def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]]) -> None:
+def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]], model: str = TAKE_MODEL) -> None:
     """Paper-machine's pattern: file first then its ledger row, failures billed at EST_WALL_S, overhead row in finally.
     Sheets come after every file and row is written, so one bad clip never loses the rest of the batch."""
     p, led, written = run.p, run.led, []
     p.takes_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU)):  # +1 reserves the run's container load
-            raise OverBudget(f"{len(jobs)} takes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
+            raise BudgetError(f"{len(jobs)} takes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         in_call, t0 = 0.0, time.monotonic()
         try:
             results = run.generator().clips([ClipJob(s.id, key, pl.prompt, seed, pl.kf) for s, key, seed, pl in jobs])
             for (s, key, seed, pl), res in zip(jobs, results, strict=True):
-                row = {"key": key, "shot": s.id, "gen": pl.gen, "round": pl.round, "seed": seed, "model": TAKE_MODEL, "prompt": pl.prompt}
+                row = {"key": key, "shot": s.id, "gen": pl.gen, "round": pl.round, "seed": seed, "model": model, "prompt": pl.prompt}
                 row["keyframe"] = str(pl.kf_path.resolve())
                 if isinstance(res, BaseException):
                     log.error("take %s failed: %r", key, res)
@@ -138,6 +140,26 @@ def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]]) -> None:
                             keyframe="", output=None, wall_s=max(0.0, time.monotonic() - t0 - in_call)))  # fmt: skip
     for key in written:
         sheet(p, key)
+
+
+def quick_key(p: Project, shot: Shot, brief: Brief, entry: dict) -> str:
+    return job_key(shot.id, QUICK_SEED, compose(shot, brief), (p.root / entry["path"]).read_bytes())
+
+
+def quick_takes(run: Run, shots: list[Shot], brief: Brief, kfs: dict) -> dict[str, str]:
+    """One unreviewed seed-1 take per shot (ledger model "quick", gen 0, round 0), reusing finished ones.
+    Returns {shot_id: key} for the shots that have their take; failures are logged by _run_takes."""
+    keys = {s.id: quick_key(run.p, s, brief, kfs[s.id]) for s in shots}
+    jobs = []
+    for s in shots:
+        if not run.led.done(keys[s.id]):
+            kf_path = run.p.root / kfs[s.id]["path"]
+            jobs.append(
+                (s, keys[s.id], QUICK_SEED, TakePlan("run", prompt=compose(s, brief), kf=kf_path.read_bytes(), kf_path=kf_path, gen=0))
+            )
+    if jobs:
+        _run_takes(run, jobs, QUICK_MODEL)
+    return {sid: k for sid, k in keys.items() if run.led.done(k)}
 
 
 def _plans(run: Run) -> tuple[Brief, list[Shot], dict, dict[str, TakePlan]]:
@@ -175,7 +197,22 @@ def run_takes(run: Run) -> None:
         if plans[s.id].need == "limit":  # R6: per shot; the rest still run
             log.warning("%s: round %d refused; pick a round-2 take", s.id, plans[s.id].round)
     jobs = [(s, k, seed, plans[s.id]) for s in shots if plans[s.id].need == "run" for k, seed in plans[s.id].todo]
-    if jobs:
+    if jobs and not run.led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU)):
+        # the round won't fit: each unfinished shot gets one quick take, used as is, so the video still ships
+        kfs = read_json(p.keyframes_path)
+        fallback = list({s.id: s for s, *_ in jobs}.values())
+        log.warning("cap reached: quick takes instead of the round for %s", ", ".join(s.id for s in fallback))
+        for sid, key in quick_takes(run, fallback, brief, kfs).items():
+            picks[sid] = {
+                "key": key,
+                "clip": f"{p.takes_dir.name}/{key}.mp4",
+                "in": IN_POINT,
+                "round": 0,
+                "gen": plans[sid].gen,
+                "quick": True,
+            }
+        write_json(p.picks_path, picks)
+    elif jobs:
         _run_takes(run, jobs)
     if not auto_mode:
         return
