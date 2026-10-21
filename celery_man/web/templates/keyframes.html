@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Keyframes{% endblock %}
+{% block main %}
+<h1>Keyframes</h1>
+{% if not rows %}<p>No shots yet. Save the <a href="/shots">shots</a>, then run.</p>{% endif %}
+<div class="grid">
+{% for r in rows %}{% set s, kf = r.s, r.kf %}
+<figure id="{{ s.id }}">
+  {% if kf %}<img src="/files/{{ kf.path }}" alt="keyframe for {{ s.id }}" width="960" height="544">{% else %}<div class="empty">not generated yet</div>{% endif %}
+  <figcaption>
+    <strong>{{ s.id }}</strong> {{ s.action }}
+    <span class="state state-{{ r.need }}">{% if r.need == "done" %}approved{% elif r.need == "judge" %}awaiting approval{% elif kf and kf.approved is false %}rejected, regenerates on run{% else %}regenerates on run{% endif %}</span>
+    {% if kf and kf.note %}<em>{{ kf.note }}</em>{% endif %}
+  </figcaption>
+  {% if kf and r.need != "gen" and not (auto or running) %}
+  <form method="post" action="/keyframes/{{ s.id }}" class="inline">
+    <input name="note" placeholder="note" aria-label="{{ s.id }} note">
+    <button class="primary" name="verdict" value="approve">Approve</button>
+    <button name="verdict" value="reject">Reject</button>
+  </form>
+  {% endif %}
+</figure>
+{% endfor %}
+</div>
+{% endblock %}

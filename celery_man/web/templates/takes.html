@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Takes{% endblock %}
+{% block main %}
+<h1>Takes</h1>
+{% if not rows %}<p>No shots yet. Save the <a href="/shots">shots</a>, then run.</p>{% endif %}
+{% for r in rows %}{% set s, plan, pick = r.s, r.plan, r.pick %}
+<section id="{{ s.id }}">
+  <h2>{{ s.id }} <small>{{ s.action }}</small></h2>
+  {% if plan.need == "done" %}
+    <p>Picked <code>{{ pick.key }}</code>{% if pick.quick %} (quick){% endif %}, round {{ pick.round }}.</p>
+  {% elif plan.need == "edit" %}
+    <p class="error">Rejected: {{ pick.reason }}. <a href="/shots#{{ s.id }}">Rewrite this shot</a>, then run for round {{ plan.round }}.</p>
+  {% elif plan.need == "fallback" %}
+    <p>No usable round-{{ r.max_round }} take; the next run gives this shot one quick take.</p>
+  {% elif plan.need == "run" %}
+    <p>Takes not made yet; they come with the next run.</p>
+  {% else %}
+    <p>Gen {{ plan.gen }}, round {{ r.round }}{% if r.round >= r.max_round %}: the last round, pick one{% endif %}.</p>
+    <div class="sheets">
+    {% for key, sh in r.sheets %}
+      <figure>
+        {% if sh %}<img src="/files/{{ sh }}" alt="contact sheet {{ key }}">{% else %}<div class="empty">unusable clip</div>{% endif %}
+        <figcaption><a href="/files/takes/{{ key }}.mp4">{{ key }}</a></figcaption>
+        {% if sh and not (auto or running) %}<form method="post" action="/takes/{{ s.id }}/pick"><input type="hidden" name="key" value="{{ key }}"><button class="primary">Pick</button></form>{% endif %}
+      </figure>
+    {% endfor %}
+    </div>
+    {% if not (auto or running) and plan.need == "judge" %}
+    <form method="post" action="/takes/{{ s.id }}/reject" class="inline">
+      {% set last = r.round >= r.max_round and r.usable %}
+      <input name="reason" required placeholder="why none works" aria-label="{{ s.id }} reason"{% if last %} disabled{% endif %}>
+      <button{% if last %} disabled title="round {{ r.max_round }} must pick a take"{% endif %}>Reject all</button>
+    </form>
+    {% endif %}
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}
