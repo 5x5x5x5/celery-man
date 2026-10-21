@@ -142,9 +142,20 @@ def test_write_brief_is_lenient_and_strict_feedback():
     from celery_man.auto import write_brief
 
     st = {"medium": ["ink", "paper"], "palette": "grey", "lighting": "soft", "camera": "static"}
-    sloppy = {"logline": "l", "style": st, "cast": {"name": "A", "description": "d"}, "places": [], "avoid": "blur, text;  ,glare"}
+    sloppy = {
+        "logline": "l",
+        "style": st,
+        "cast": {"name": "A", "description": "d"},
+        "places": {"name": "P", "description": "a room"},
+        "avoid": "blur, text;  ,glare",
+    }
     b = write_brief(stub(json.dumps(sloppy)), "")
-    assert b.avoid == ["blur", "text", "glare"] and b.style["medium"] == "ink, paper" and [c.name for c in b.cast] == ["A"]
+    assert (
+        b.avoid == ["blur", "text", "glare"]
+        and b.style["medium"] == "ink, paper"
+        and [c.name for c in b.cast] == ["A"]
+        and [p.name for p in b.places] == ["P"]
+    )
     chat = stub(json.dumps(sloppy | {"avoid": 5}), json.dumps(sloppy))
     write_brief(chat, "")
     assert "avoid (a list of strings): expected list, got int" in chat.calls[1][1]

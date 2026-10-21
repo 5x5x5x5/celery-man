@@ -78,3 +78,8 @@ def _song(tmp_path):
 
 def test_shot_is_dataclass():
     assert Shot(**SHOT).cast == ["A"]
+
+
+def test_brief_from_dict_stays_strict_on_string_avoid():
+    with pytest.raises(ValueError, match="expected list, got str"):
+        brief_from_dict({**BRIEF, "avoid": "blur, text"})
