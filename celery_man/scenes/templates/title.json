@@ -1,0 +1,26 @@
+{
+  "family": "type",
+  "description": "A single line of text that pulses on downbeats after fading in.",
+  "params": {
+    "text": {
+      "type": "string",
+      "default": "",
+      "max_len": 60,
+      "doc": "The line to show. Empty draws a plain dot instead."
+    },
+    "pulse": {
+      "type": "number",
+      "default": 0.3,
+      "min": 0,
+      "max": 1,
+      "doc": "How much the text swells on each downbeat, 0 for none."
+    },
+    "fade": {
+      "type": "number",
+      "default": 4,
+      "min": 0,
+      "max": 32,
+      "doc": "Beats over which the text fades in."
+    }
+  }
+}

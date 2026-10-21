@@ -1,0 +1,20 @@
+{
+  "family": "particles",
+  "description": "Particles thrown from the centre on each downbeat, sized by the lows.",
+  "params": {
+    "count": {
+      "type": "integer",
+      "default": 150,
+      "min": 10,
+      "max": 1000,
+      "doc": "Particles thrown per downbeat."
+    },
+    "gravity": {
+      "type": "number",
+      "default": 0.4,
+      "min": 0,
+      "max": 3,
+      "doc": "Downward pull as a fraction of frame height per second squared."
+    }
+  }
+}

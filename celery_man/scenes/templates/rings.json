@@ -1,0 +1,20 @@
+{
+  "family": "geometric",
+  "description": "Concentric rings born on each beat that expand with the loudness.",
+  "params": {
+    "count": {
+      "type": "integer",
+      "default": 8,
+      "min": 1,
+      "max": 32,
+      "doc": "Rings alive at once."
+    },
+    "thickness": {
+      "type": "number",
+      "default": 0.012,
+      "min": 0.002,
+      "max": 0.1,
+      "doc": "Ring line width as a fraction of frame height."
+    }
+  }
+}

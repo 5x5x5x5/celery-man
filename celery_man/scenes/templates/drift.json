@@ -1,0 +1,20 @@
+{
+  "family": "particles",
+  "description": "Particles carried along a flowing noise field, faster when louder.",
+  "params": {
+    "count": {
+      "type": "integer",
+      "default": 1200,
+      "min": 100,
+      "max": 4000,
+      "doc": "Number of particles."
+    },
+    "trail": {
+      "type": "number",
+      "default": 0.85,
+      "min": 0,
+      "max": 0.98,
+      "doc": "How long trails linger, 0 for none."
+    }
+  }
+}
