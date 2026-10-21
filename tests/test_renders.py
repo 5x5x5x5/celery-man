@@ -139,3 +139,14 @@ def test_auto_rewrite_keeps_animation_shots(tmp_path, song):
     sts = advance(p, CountingGen(), text_chat, vision_chat({"s01"}), renderer=FakeRenderer())
     assert {s.state for s in sts} == {"done"}
     assert p.load_shots()[0].action == "a person stands" and [s.kind for s in p.load_shots()] == kinds
+
+
+def test_renderer_breakage_stops_run_and_caches_nothing(tmp_path, song):
+    class Broken:
+        def render(self, job, out):
+            raise RuntimeError("scene renderer exited 1: Executable doesn't exist")
+
+    p = project(tmp_path, song)
+    with pytest.raises(RuntimeError, match="Executable"):
+        go(p, renderer=Broken())
+    assert not (read_json(p.renders_path) or {})

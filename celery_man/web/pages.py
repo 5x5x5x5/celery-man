@@ -161,8 +161,8 @@ def _param(spec: dict, raw):
 
 def _scene(form, sid: str, old: Shot | None) -> tuple[dict, str | None]:
     """The scene dict and (for a custom scene) the code to save. Params start at defaults unless the template is unchanged."""
-    choice = form.get(f"scene_{sid}") or "custom"
     prev = old.scene if old and old.scene else {}
+    choice = form.get(f"scene_{sid}") or ("custom" if "file" in prev else scene_templates.FALLBACK_TEMPLATE)
     note = {"note": prev["note"]} if "note" in prev else {}
     if choice == "custom":
         code = form.get(f"code_{sid}")
@@ -198,6 +198,8 @@ async def shots_post(request: Request):
     for i, (a, z, sec) in enumerate(windows(p), 1):
         sid = f"s{i:02d}"
         kind = form.get(f"kind_{sid}") or (p.kinds[0] if len(p.kinds) == 1 else old[sid].kind if sid in old else "footage")
+        if kind not in p.kinds:
+            raise HTTPException(422, f"{sid}: kind {kind!r} is not enabled for this project")
         place = form.get(f"place_{sid}") or None
         scene, code = (None, None) if kind == "footage" else _scene(form, sid, old.get(sid))
         s = Shot(sid, a, z, sec, form.get(f"action_{sid}", "").strip(), form.getlist(f"cast_{sid}"), place,

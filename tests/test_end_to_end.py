@@ -7,7 +7,7 @@ from celery_man.animate import ChromiumRenderer
 from celery_man.assemble import probe_duration
 from celery_man.generate import FakeGenerator
 from celery_man.pipeline import advance
-from celery_man.project import Project, Shot, brief_from_dict, write_json
+from celery_man.project import Project, Shot, brief_from_dict, read_json, write_json
 from celery_man.steps import brief_inputs, shots_inputs, windows
 from celery_man.templates import catalogue
 from tests.test_pipeline import ALL_AUTO, BRIEF, text_chat, vision_chat
@@ -43,7 +43,7 @@ def test_end_to_end_animation_project(tmp_path):
         # one shot per template, cycling; the last uses the custom scene file
         scene = {"file": "scenes/custom.js", "params": {}} if i == len(names) else {"template": names[i % len(names)], "params": {}}
         shots.append(Shot(f"s{i + 1:02d}", a, b, sec, "a person walks", ["A"], "P", "wide shot", "animation", scene))
-    assert len(shots) >= len(names), len(shots)
+    assert len(shots) > len(names), len(shots)  # room for the custom shot too
     p.save_shots(shots, shots_inputs(p, brief))
 
     sts = advance(p, FakeGenerator(), text_chat, vision_chat(), renderer=ChromiumRenderer())
@@ -52,3 +52,5 @@ def test_end_to_end_animation_project(tmp_path):
     assert abs(probe_duration(p.out_dir / "video.mp4") - (shots[-1].end - shots[0].start)) < 0.1
     report = (p.out_dir / "report.md").read_text()
     assert all(f"template `{n}`" in report for n in names)
+    assert "file `scenes/custom.js`" in report
+    assert read_json(p.renders_path)[shots[len(names)].id]["error"] == ""

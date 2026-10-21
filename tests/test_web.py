@@ -417,3 +417,17 @@ def test_params_kept_for_displayed_default_template(tmp_path, song):
     form = {"action_s01": "a", "scene_s01": "rings", "shown_s01": "rings", "param_s01_count": "5"}
     assert c.post("/shots", data=form).status_code == 200
     assert p.load_shots()[0].scene["params"]["count"] == 5
+
+
+def test_switch_to_animation_without_scene_field_uses_fallback(tmp_path, song):
+    p = both(tmp_path, song)
+    assert client(p).post("/shots", data={"action_s01": "a", "kind_s01": "animation"}).status_code == 200
+    assert p.load_shots()[0].scene["template"] == "rings"
+    assert not p.scenes_dir.exists() or not any(p.scenes_dir.iterdir())
+
+
+def test_shots_rejects_kind_not_enabled(tmp_path, song):
+    p = project(tmp_path, song)
+    before = p.shots_path.read_text()
+    r = client(p).post("/shots", data={"action_s01": "a", "kind_s01": "animation", "scene_s01": "rings"})
+    assert r.status_code == 422 and "s01" in r.text and p.shots_path.read_text() == before

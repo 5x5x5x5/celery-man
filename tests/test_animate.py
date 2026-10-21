@@ -2,6 +2,7 @@ import hashlib
 import http.server
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -203,3 +204,48 @@ def test_interrupted_render_kills_child(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         ChromiumRenderer().render(job(n=2), tmp_path / "a.mp4")
     assert killed
+
+
+@pytest.mark.parametrize(("code", "exc"), [(3, SceneError), (1, RuntimeError)])
+def test_child_exit_code_separates_scene_from_renderer_failure(tmp_path, monkeypatch, code, exc):
+    child = tmp_path / "child"
+    child.write_text(f"#!/bin/sh\necho boom >&2\nexit {code}\n")
+    child.chmod(0o755)
+    monkeypatch.setattr(animate.sys, "executable", str(child))
+    with pytest.raises(exc, match="boom") as e:
+        ChromiumRenderer().render(job(n=2), tmp_path / "a.mp4")
+    assert (e.type is SceneError) == (code == 3)
+
+
+def test_main_exits_3_on_scene_error(tmp_path, monkeypatch, capsys):
+    spec = tmp_path / "job.json"
+    spec.write_text(json.dumps(animate.dataclasses.asdict(job(n=1)) | {"frame_limit_ms": 1}))
+    monkeypatch.setattr(animate, "render_in_browser", lambda *a: (_ for _ in ()).throw(SceneError("scene threw")))
+    with pytest.raises(SystemExit) as e:
+        animate.main([str(spec), str(tmp_path / "a.mp4")])
+    assert e.value.code == animate.SCENE_EXIT and "scene threw" in capsys.readouterr().err
+
+
+@pytest.mark.slow
+def test_webrtc_cannot_send_udp(tmp_path):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(3)
+    src = f"""
+    async function setup(env) {{
+      const pc = new RTCPeerConnection({{iceServers: [{{urls: 'stun:127.0.0.1:{sock.getsockname()[1]}'}}]}});
+      pc.createDataChannel('x');
+      await pc.setLocalDescription(await pc.createOffer());
+      await new Promise(r => setTimeout(r, 1500));
+    }}
+    function draw(ctx, f, env) {{}}
+    """
+    try:
+        ChromiumRenderer().render(job(src, n=2), tmp_path / "a.mp4")
+    except SceneError:
+        pass
+    try:
+        with pytest.raises(TimeoutError):
+            sock.recvfrom(1024)
+    finally:
+        sock.close()

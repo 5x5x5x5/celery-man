@@ -2,6 +2,7 @@
 
 import base64
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ SCENES = Path(__file__).parent / "scenes"
 ORIGIN = "http://scene.invalid/"
 FRAME_LIMIT_S = 2.0
 STARTUP_S = 30.0
+SCENE_EXIT = 3  # child exit code for a scene's own failure; anything else is the renderer breaking
 
 
 class SceneError(RuntimeError):
@@ -43,6 +45,7 @@ class Renderer(Protocol):
     def render(self, job: RenderJob, out: Path) -> Path: ...
 
 
+@functools.cache
 def runtime_sha() -> str:
     h = hashlib.sha256()
     for p in [SCENES / "index.html", SCENES / "runtime.js", *sorted((SCENES / "fonts").glob("*.ttf"))]:
@@ -89,7 +92,8 @@ def render_in_browser(job: RenderJob, out: Path, frame_limit_ms: float) -> Path:
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            # route + CSP do not cover WebRTC: stop it sending UDP (STUN) straight out
+            browser = p.chromium.launch(args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
             # route on the context, not the page, so popups (window.open, target=_blank) are sandboxed too
             context = browser.new_context(viewport={"width": job.width, "height": job.height}, service_workers="block")
             context.route("**/*", _serve(job.source))
@@ -115,7 +119,7 @@ def render_in_browser(job: RenderJob, out: Path, frame_limit_ms: float) -> Path:
             browser.close()
         ff.stdin.close()
         if ff.wait() != 0:
-            raise SceneError("ffmpeg failed to encode the scene")
+            raise RuntimeError("ffmpeg failed to encode the scene")
     except BaseException:
         ff.kill()
         part.unlink(missing_ok=True)
@@ -144,8 +148,11 @@ class ChromiumRenderer:
                 if isinstance(e, subprocess.TimeoutExpired):
                     raise SceneError(f"scene did not finish in {timeout:.0f}s (stuck loop?)") from None
                 raise
-        if child.returncode != 0:
-            raise SceneError("\n".join(err.strip().splitlines()[-20:]) or f"scene render exited {child.returncode}")
+        tail = "\n".join(err.strip().splitlines()[-20:])
+        if child.returncode == SCENE_EXIT:
+            raise SceneError(tail or "scene failed")
+        if child.returncode != 0:  # the renderer itself broke (no Chromium, no ffmpeg): stop the run, cache nothing
+            raise RuntimeError(f"scene renderer exited {child.returncode}: {tail}")
         return out
 
 
@@ -176,7 +183,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         render_in_browser(RenderJob(**d), Path(out), limit)
     except SceneError as e:
-        sys.exit(str(e))
+        sys.stderr.write(f"{e}\n")  # the parent reads the child's stderr as the error
+        sys.exit(SCENE_EXIT)
 
 
 if __name__ == "__main__":

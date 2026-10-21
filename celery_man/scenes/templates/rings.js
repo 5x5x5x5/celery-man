@@ -1,4 +1,4 @@
-const col = (env, i) => env.look.colors[i % env.look.colors.length];
+const col = (env, i) => { const n = env.look.colors.length; return env.look.colors[((i % n) + n) % n]; };
 function setup(env) {}
 function draw(ctx, f, env) {
   const { width: w, height: h, look, params: p } = env;
