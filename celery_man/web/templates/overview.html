@@ -27,6 +27,13 @@
   </form>
 </section>
 <section>
+  <h2>Kinds <small>of shot this project allows</small></h2>
+  <form method="post" action="/kinds"><fieldset{% if running %} disabled{% endif %}>
+    {% for k in kinds %}<label class="check"><input type="checkbox" name="kinds" value="{{ k }}"{% if k in allowed %} checked{% endif %}> {{ k }}</label>{% endfor %}
+    <br><button type="submit">Save kinds</button></fieldset>
+  </form>
+</section>
+<section>
   <h2>Budget</h2>
   <p class="figures"><span>Spent ${{ "%.2f"|format(spent) }} of ${{ "%.2f"|format(cap) }}</span>
      <span>{% if est is none %}Next run: estimate after shots are written{% else %}Next run ≈${{ "%.2f"|format(est) }}{% endif %}</span></p>

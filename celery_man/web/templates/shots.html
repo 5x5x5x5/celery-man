@@ -14,8 +14,30 @@
   <tbody>
   {% for r in rows %}{% set s = r.s %}
   <tr id="{{ s.id }}"{% if r.error %} class="has-error"{% endif %}>
-    <td data-label="Shot"><strong>{{ s.id }}</strong><br><span class="time">{{ "%.2f"|format(s.start) }}–{{ "%.2f"|format(s.end) }}</span> · {{ s.section }}</td>
+    <td data-label="Shot"><strong>{{ s.id }}</strong><br><span class="time">{{ "%.2f"|format(s.start) }}–{{ "%.2f"|format(s.end) }}</span> · {{ s.section }}
+      {% if both %}<select name="kind_{{ s.id }}" aria-label="{{ s.id }} kind">{% for k in ("footage", "animation") %}<option{% if k == s.kind %} selected{% endif %}>{{ k }}</option>{% endfor %}</select>{% endif %}</td>
     <td data-label="Action"><textarea name="action_{{ s.id }}" rows="2" aria-label="{{ s.id }} action">{{ s.action }}</textarea></td>
+    {% if s.kind == "animation" %}
+    <td data-label="Scene" colspan="3" class="scene">
+      <select name="scene_{{ s.id }}" aria-label="{{ s.id }} scene">
+        {% for n in templates %}<option{% if n == r.tpl %} selected{% endif %}>{{ n }}</option>{% endfor %}
+        <option{% if r.tpl == "custom" %} selected{% endif %}>custom</option>
+      </select>
+      {% for name, sp in r.specs.items() %}{% set v = s.scene.params.get(name, sp.default) %}{% set fid = "param_" ~ s.id ~ "_" ~ name %}
+      <label for="{{ fid }}">{{ name }} <small>{{ sp.doc }}</small></label>
+      {% if sp.type == "bool" %}<input type="checkbox" id="{{ fid }}" name="{{ fid }}"{% if v %} checked{% endif %}>
+      {% elif sp.type == "choice" %}<select id="{{ fid }}" name="{{ fid }}">{% for c in sp.choices %}<option{% if c == v %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+      {% elif sp.type in ("number", "integer") %}<input type="number" id="{{ fid }}" name="{{ fid }}" value="{{ v }}" step="{{ 1 if sp.type == 'integer' else 'any' }}"{% if sp.min is defined %} min="{{ sp.min }}"{% endif %}{% if sp.max is defined %} max="{{ sp.max }}"{% endif %}>
+      {% else %}<input type="text" id="{{ fid }}" name="{{ fid }}" value="{{ v }}"{% if sp.max_len %} maxlength="{{ sp.max_len }}"{% endif %}>{% endif %}
+      {% endfor %}
+      {% if r.tpl == "custom" %}
+      <label for="code_{{ s.id }}">Scene code <small>saved to scenes/{{ s.id }}.js</small></label>
+      <textarea id="code_{{ s.id }}" name="code_{{ s.id }}" rows="8" class="code" spellcheck="false">{{ r.code }}</textarea>
+      {% endif %}
+      {% if r.poster %}<figure class="poster"><img src="/files/{{ r.poster }}" alt="{{ s.id }} last render" loading="lazy"></figure>{% endif %}
+      {% if r.render_error %}<p class="error">Last render failed: {{ r.render_error }}</p>{% endif %}
+    </td>
+    {% else %}
     <td data-label="Cast">{% for c in brief.cast %}
       <label class="check"><input type="checkbox" name="cast_{{ s.id }}" value="{{ c.name }}"{% if c.name in s.cast %} checked{% endif %}> {{ c.name }}</label>
     {% endfor %}</td>
@@ -24,13 +46,15 @@
       {% for pl in brief.places %}<option{% if pl.name == s.place %} selected{% endif %}>{{ pl.name }}</option>{% endfor %}
     </select></td>
     <td data-label="Framing"><input name="framing_{{ s.id }}" value="{{ s.framing }}" aria-label="{{ s.id }} framing"></td>
-    <td data-label="Tokens" class="tokens{% if r.tokens and r.tokens > limit %} over{% endif %}">{{ r.tokens if r.tokens is not none else "?" }} / {{ limit }}</td>
+    {% endif %}
+    <td data-label="Tokens" class="tokens{% if r.tokens and r.tokens > limit %} over{% endif %}">{% if s.kind == "animation" %}—{% else %}{{ r.tokens if r.tokens is not none else "?" }} / {{ limit }}{% endif %}</td>
   </tr>
   {% if r.error %}<tr class="row-error"><td colspan="6"><p class="error">{{ s.id }}: {{ r.error }}</p></td></tr>{% endif %}
   {% endfor %}
   </tbody>
 </table>
 <button class="primary" type="submit">Save shots</button>
+{% if both %}<p class="hint">Changing a shot's kind or template takes effect when you save; a new template starts at its defaults.</p>{% endif %}
 </fieldset>
 </form>
 {% endif %}

@@ -33,6 +33,21 @@
     {{ rows("place", places) }}
   </section>
   <section>
+    <h2>Look <small>for animation shots</small></h2>
+    <div class="swatches">
+      <label class="swatch" for="background">Background<input type="color" id="background" name="background" value="{{ look.background }}"></label>
+      {% for i in range(1, 6) %}{% set c = look.colors[i - 1] if i <= look.colors|length else None %}
+      <div class="swatch">
+        <label for="color_{{ i }}">Colour {{ i }}</label>
+        <input type="color" id="color_{{ i }}" name="color_{{ i }}" value="{{ c or look.background }}">
+        <label class="check"><input type="checkbox" name="unused_{{ i }}"{% if c is none %} checked{% endif %}> unused</label>
+      </div>
+      {% endfor %}
+    </div>
+    <label for="typeface">Typeface</label>
+    <select id="typeface" name="typeface">{% for f in typefaces %}<option{% if f == look.typeface %} selected{% endif %}>{{ f }}</option>{% endfor %}</select>
+  </section>
+  <section>
     <label for="avoid">Avoid <small>one per line</small></label>
     <textarea id="avoid" name="avoid" rows="3">{{ b.avoid|join("\n") }}</textarea>
   </section>

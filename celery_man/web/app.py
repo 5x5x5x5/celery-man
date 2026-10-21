@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from celery_man.ledger import Ledger
 from celery_man.pipeline import advance, estimate, run_busy, status
-from celery_man.project import DEFAULT_MODES, Project, write_json
+from celery_man.project import DEFAULT_MODES, KINDS, Project, write_json
 from celery_man.web.pages import guard_run, render, router
 
 log = logging.getLogger(__name__)
@@ -71,12 +71,12 @@ def create_app(project: Project, gen_factory: Callable, chat_factory: Callable) 
     def overview(request: Request):
         p, runner = project, app.state.runner
         try:
-            cap, modes = p.cap_usd, p.modes
+            cap, modes, allowed = p.cap_usd, p.modes, p.kinds
             est = estimate(p) if p.shots_path.exists() else None  # None: known only once the shots are written
             sts, spent, err = status(p), Ledger(p.ledger_path, cap).spent_usd(), ""
         except Exception as e:  # noqa: BLE001 - show a broken project file instead of a 500
-            sts, est, spent, cap, modes, err = [], 0.0, 0.0, 0.0, {}, f"{type(e).__name__}: {e}"
-        return render(request, "overview.html", steps=sts, est=est, spent=spent, cap=cap, modes=modes, choices=MODES,
+            sts, est, spent, cap, modes, allowed, err = [], 0.0, 0.0, 0.0, {}, [], f"{type(e).__name__}: {e}"
+        return render(request, "overview.html", steps=sts, est=est, spent=spent, cap=cap, modes=modes, choices=MODES, kinds=KINDS, allowed=allowed,
                       error=runner.error or err)  # fmt: skip
 
     @app.post("/modes")
@@ -87,6 +87,15 @@ def create_app(project: Project, gen_factory: Callable, chat_factory: Callable) 
         if any(v not in MODES for v in new.values()):
             raise HTTPException(400, f"modes are {', '.join(MODES)}")
         write_json(project.root / "project.json", project.config | {"modes": project.modes | new})
+        return RedirectResponse("/", 303)
+
+    @app.post("/kinds")
+    async def kinds(request: Request):
+        guard_run(request)
+        picked = [k for k in KINDS if k in (await request.form()).getlist("kinds")]
+        if not picked:
+            raise HTTPException(422, f"pick at least one kind of shot: {', '.join(KINDS)}")
+        write_json(project.root / "project.json", project.config | {"kinds": picked})
         return RedirectResponse("/", 303)
 
     @app.post("/run")
