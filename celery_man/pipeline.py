@@ -7,7 +7,7 @@ from pathlib import Path
 
 from celery_man import steps, takes
 from celery_man.assemble import assemble
-from celery_man.auto import ChatFn
+from celery_man.auto import AutoError, ChatFn
 from celery_man.generate import Generator
 from celery_man.ledger import Ledger, cost
 from celery_man.project import Brief, Project, Shot, read_json, write_json
@@ -110,7 +110,8 @@ def quick_cost(p: Project) -> float:
     if brief is None or not shots:
         return 0.0
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
-    open_ = [s for s in shots if takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need != "done"]
+    # "judge" and "limit" shots have their takes paid for; they only wait on a pick
+    open_ = [s for s in shots if takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need not in ("done", "judge", "limit")]
     return _quick_price(p, led, open_, brief, kfs)
 
 
@@ -130,6 +131,8 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None) -> Path:
                 raise WaitingError(step)
             if st.state != "done":
                 RUNNERS[step](run)
+                if (st := status(p)[i]).state != "done":
+                    raise WaitingError(step) if st.state == "waiting" else AutoError(f"quick: {step} is still {st.state} after running it")
         brief, shots, kfs = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}
         _preflight(p, run.led, _quick_price(p, run.led, shots, brief, kfs))
         regen = [(s, steps.QUICK_SEED) for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen"]

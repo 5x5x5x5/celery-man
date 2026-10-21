@@ -14,6 +14,7 @@ from celery_man.generate import ClipJob
 from celery_man.ledger import Ledger, cost, job_key
 from celery_man.project import Brief, Project, Shot, read_json, write_json
 from celery_man.steps import (
+    EST_STILL_S,
     EST_WALL_S,
     IN_POINT,
     MAX_ROUND,
@@ -21,6 +22,7 @@ from celery_man.steps import (
     QUICK_MODEL,
     QUICK_SEED,
     SEEDS,
+    STILL_GPU,
     TAKE_GPU,
     TAKE_MODEL,
     BudgetError,
@@ -197,10 +199,13 @@ def run_takes(run: Run) -> None:
         if plans[s.id].need == "limit":  # R6: per shot; the rest still run
             log.warning("%s: round %d refused; pick a round-2 take", s.id, plans[s.id].round)
     jobs = [(s, k, seed, plans[s.id]) for s in shots if plans[s.id].need == "run" for k, seed in plans[s.id].todo]
-    if jobs and not run.led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU)):
+    fallback = list({s.id: s for s, *_ in jobs}.values())
+    # a round launches only if the quick fallback stays payable after it: one quick take per shot plus a load, and in
+    # auto mode one still per shot for a rewrite after a rejection (otherwise a rejection can strand the video)
+    reserve = cost(len(fallback) + 1, EST_WALL_S, TAKE_GPU) + (cost(len(fallback), EST_STILL_S, STILL_GPU) if auto_mode else 0.0)
+    if jobs and not run.led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU) + reserve):
         # the round won't fit: each unfinished shot gets one quick take, used as is, so the video still ships
         kfs = read_json(p.keyframes_path)
-        fallback = list({s.id: s for s, *_ in jobs}.values())
         log.warning("cap reached: quick takes instead of the round for %s", ", ".join(s.id for s in fallback))
         for sid, key in quick_takes(run, fallback, brief, kfs).items():
             picks[sid] = {

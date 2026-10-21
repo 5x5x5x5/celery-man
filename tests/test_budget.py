@@ -1,9 +1,10 @@
 import pytest
 
 from celery_man.assemble import probe_duration
-from celery_man.ledger import Ledger
+from celery_man.ledger import Ledger, cost
 from celery_man.pipeline import BudgetError, WaitingError, quick, quick_cost
 from celery_man.project import read_json, write_json
+from celery_man.steps import EST_STILL_S, EST_WALL_S
 from tests.test_pipeline import CountingGen, make, run_auto, states, text_chat
 
 
@@ -77,3 +78,41 @@ def test_quick_refuses_over_cap(tmp_path, song):
     with pytest.raises(BudgetError):
         quick(p, gen, chat_text=text_chat)
     assert jobs(p) == [] and gen.stills_n == []
+
+
+class RealWall(CountingGen):
+    """Bills each job at the pipeline's own estimates, so ledger spend tracks what the cap checks assume."""
+
+    def stills(self, jobs):
+        return [r if isinstance(r, BaseException) else r | {"wall_s": EST_STILL_S} for r in super().stills(jobs)]
+
+    def clips(self, jobs):
+        return [r if isinstance(r, BaseException) else r | {"wall_s": EST_WALL_S} for r in super().clips(jobs)]
+
+
+def test_partial_fallback_with_realistic_spend(tmp_path, song):
+    # round 1 (24 takes + load) plus the quick reserve (8 quick + load + 8 stills) just fits; round 2 for 4 shots won't
+    cap = 3 + cost(16, EST_STILL_S, "L40S") + cost(25 + 9, EST_WALL_S, "L4") + 0.01
+    p = with_cap(make(tmp_path, song), cap)
+    sts = run_auto(p, RealWall(), reject={"s01", "s02", "s03", "s04"})
+    assert set(states(sts).values()) == {"done"}
+    assert (p.out_dir / "video.mp4").exists()
+    fell_back = (p.out_dir / "report.md").read_text().split("Quick fallback (cap reached)")[1]
+    assert "s01" in fell_back and "s04" in fell_back and "s05" not in fell_back
+    assert Ledger(p.ledger_path).spent_usd() <= cap
+
+
+def test_quick_cost_skips_takes_that_only_need_judging(tmp_path, song):
+    p = make(tmp_path, song, modes={"brief": "auto", "shots": "auto", "keyframes": "auto", "takes": "tastemaker"})
+    assert states(run_auto(p))["takes"] == "waiting"
+    assert quick_cost(p) == 0
+
+
+def test_round_that_would_strand_the_fallback_is_not_launched(tmp_path, song):
+    # review repro: round 1 alone fits, but a rejection then needs a still + quick take the round would have eaten
+    cap = 3 + cost(8, EST_STILL_S, "L40S") + cost(25, EST_WALL_S, "L4") + 0.01
+    p = with_cap(make(tmp_path, song), cap)
+    sts = run_auto(p, RealWall(), reject={"s01"})
+    assert set(states(sts).values()) == {"done"} and (p.out_dir / "video.mp4").exists()
+    assert "s01" in (p.out_dir / "report.md").read_text().split("Quick fallback (cap reached)")[1]
+    assert Ledger(p.ledger_path).spent_usd() <= cap
