@@ -26,8 +26,10 @@ def cut_points(cuts: list[dict]) -> list[float]:
 
 
 def assemble(cuts: list[dict], song: Path, out: Path, fps: int = 24, w: int = 960, h: int = 544) -> Path:
+    if not cuts:
+        raise ValueError("no cuts to assemble")
     for i, (a, b) in enumerate(itertools.pairwise(cuts)):
-        if a["end"] != b["start"]:
+        if abs(a["end"] - b["start"]) > 1e-6:
             raise ValueError(f"cuts must be contiguous and in order: cut {i} ends {a['end']} but cut {i + 1} starts {b['start']}")
     for i, c in enumerate(cuts):
         have, need = probe_duration(c["clip"]), c["in"] + (c["end"] - c["start"])
@@ -41,7 +43,7 @@ def assemble(cuts: list[dict], song: Path, out: Path, fps: int = 24, w: int = 96
             seg = Path(tmp) / f"{i}.mp4"
             log.info("trim cut %d: %s from %.2fs for %.2fs", i, c["clip"], c["in"], c["end"] - c["start"])
             subprocess.run(
-                ["ffmpeg", "-loglevel", "error", "-y", "-i", c["clip"], "-ss", str(c["in"]), "-t", str(c["end"] - c["start"]),
+                ["ffmpeg", "-loglevel", "error", "-y", "-i", c["clip"], "-ss", str(c["in"]), "-frames:v", str(round(c["end"] * fps) - round(c["start"] * fps)),
                  "-an", "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(seg)],
                 check=True,
             )  # fmt: skip

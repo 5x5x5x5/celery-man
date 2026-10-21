@@ -21,6 +21,14 @@ def stream_types(path) -> list[str]:
     return out.split()
 
 
+def frame_count(path) -> int:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout  # fmt: skip
+    return int(out)
+
+
 def make_cuts(tmp_path, fps_list, edges):
     cuts = []
     for i, fps in enumerate(fps_list):
@@ -33,7 +41,7 @@ def make_cuts(tmp_path, fps_list, edges):
 @pytest.fixture
 def song(tmp_path):
     p = tmp_path / "song.wav"
-    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=duration=30", str(p)], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=duration=40", str(p)], check=True)
     return p
 
 
@@ -66,7 +74,19 @@ def test_uneven_windows(tmp_path, song):
     cuts = make_cuts(tmp_path, [24, 24], [8.0, 10.667, 14.667])
     assert cut_points(cuts) == [8.0, 10.667, 14.667]
     out = assemble(cuts, song, tmp_path / "v.mp4", w=320, h=180)
-    assert abs(probe_duration(out) - 6.667) <= 1 / 24
+    assert frame_count(out) == round(14.667 * 24) - round(8.0 * 24)
+
+
+def test_no_cumulative_drift(tmp_path, song):
+    edges = [8.0 + i * 3.1111 for i in range(9)]
+    cuts = make_cuts(tmp_path, [24] * 8, edges)
+    out = assemble(cuts, song, tmp_path / "v.mp4", w=320, h=180)
+    assert frame_count(out) == round(edges[-1] * 24) - round(edges[0] * 24)
+
+
+def test_empty_cuts_rejected(song, tmp_path):
+    with pytest.raises(ValueError, match="no cuts"):
+        assemble([], song, tmp_path / "v.mp4")
 
 
 def test_short_clip_fails_loudly(cuts_24, song, tmp_path):
