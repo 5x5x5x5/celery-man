@@ -84,10 +84,10 @@ class RealWall(CountingGen):
     """Bills each job at the pipeline's own estimates, so ledger spend tracks what the cap checks assume."""
 
     def stills(self, jobs):
-        return [r if isinstance(r, BaseException) else r | {"wall_s": EST_STILL_S} for r in super().stills(jobs)]
+        return (r if isinstance(r, BaseException) else r | {"wall_s": EST_STILL_S} for r in super().stills(jobs))
 
     def clips(self, jobs):
-        return [r if isinstance(r, BaseException) else r | {"wall_s": EST_WALL_S} for r in super().clips(jobs)]
+        return (r if isinstance(r, BaseException) else r | {"wall_s": EST_WALL_S} for r in super().clips(jobs))
 
 
 def test_partial_fallback_with_realistic_spend(tmp_path, song):

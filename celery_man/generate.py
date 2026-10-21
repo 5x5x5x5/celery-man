@@ -32,9 +32,11 @@ class ClipJob:
 
 
 class Generator(Protocol):
+    """stills and clips yield one Result per job, in job order, as each finishes, so callers record work as it lands."""
+
     def session(self) -> ContextManager: ...
-    def stills(self, jobs: list[StillJob]) -> list[Result]: ...
-    def clips(self, jobs: list[ClipJob]) -> list[Result]: ...
+    def stills(self, jobs: list[StillJob]) -> Iterator[Result]: ...
+    def clips(self, jobs: list[ClipJob]) -> Iterator[Result]: ...
 
 
 class FakeGenerator:
@@ -76,11 +78,11 @@ class FakeGenerator:
             )
             return {"mp4": out.read_bytes(), "wall_s": 1.0, "gpu": "L4"}
 
-    def stills(self, jobs: list[StillJob]) -> list[Result]:
-        return [self._one(j) for j in jobs]
+    def stills(self, jobs: list[StillJob]) -> Iterator[Result]:
+        return (self._one(j) for j in jobs)
 
-    def clips(self, jobs: list[ClipJob]) -> list[Result]:
-        return [self._one(j) for j in jobs]
+    def clips(self, jobs: list[ClipJob]) -> Iterator[Result]:
+        return (self._one(j) for j in jobs)
 
 
 class ModalGenerator:
@@ -95,20 +97,18 @@ class ModalGenerator:
         with modal.enable_output(), app.run():
             yield
 
-    @staticmethod
-    def _wrap(raw: list, gpu: str, key: str, wall_s: float) -> list[Result]:
-        # starmap returns no per-call timing for stills, so the batch's wall time is split evenly (clips report their own wall_s)
-        return [r if isinstance(r, BaseException) else {key: r, "wall_s": wall_s / len(raw), "gpu": gpu} for r in raw]
-
-    def stills(self, jobs: list[StillJob]) -> list[Result]:
+    def stills(self, jobs: list[StillJob]) -> Iterator[Result]:
         from celery_man.gen_modal import Keyframer
 
-        t0 = time.monotonic()
-        raw = list(Keyframer().still.starmap([(j.prompt, j.seed) for j in jobs], return_exceptions=True))
-        return self._wrap(raw, "L40S", "png", time.monotonic() - t0)
+        # starmap gives no per-call timing for stills; with one container each still costs the time since the previous result
+        t = time.monotonic()
+        for r in Keyframer().still.starmap([(j.prompt, j.seed) for j in jobs], return_exceptions=True):
+            now = time.monotonic()
+            yield r if isinstance(r, BaseException) else {"png": r, "wall_s": now - t, "gpu": "L40S"}
+            t = now
 
-    def clips(self, jobs: list[ClipJob]) -> list[Result]:
+    def clips(self, jobs: list[ClipJob]) -> Iterator[Result]:
         from celery_man.gen_modal import ANIMATOR_GPU, Animator
 
-        raw = Animator().clip.starmap([(j.keyframe, j.prompt, j.seed) for j in jobs], return_exceptions=True)
-        return [r if isinstance(r, BaseException) else {"mp4": r["mp4"], "wall_s": r["wall_s"], "gpu": ANIMATOR_GPU} for r in raw]
+        for r in Animator().clip.starmap([(j.keyframe, j.prompt, j.seed) for j in jobs], return_exceptions=True):
+            yield r if isinstance(r, BaseException) else {"mp4": r["mp4"], "wall_s": r["wall_s"], "gpu": ANIMATOR_GPU}

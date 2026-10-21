@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -35,18 +36,19 @@ class CountingGen(FakeGenerator):
 
     def clips(self, jobs):
         self.clips_n += [j.shot_id for j in jobs]
-        out = []
+        return self._clips(jobs)
+
+    def _clips(self, jobs):
         for j in jobs:
             if j.shot_id in self.fail_clips:
-                out.append(RuntimeError("boom"))
+                yield RuntimeError("boom")
                 continue
             if j.key in self.junk or j.shot_id in self.junk:
                 self.junk.discard(j.shot_id)  # a shot id junks only its first take
-                out.append({"mp4": b"not an mp4", "wall_s": 1.0, "gpu": "L4"})
+                yield {"mp4": b"not an mp4", "wall_s": 1.0, "gpu": "L4"}
                 continue
-            self._clip = self._clip or super().clips([j])[0]
-            out.append(dict(self._clip))
-        return out
+            self._clip = self._clip or next(super().clips([j]))
+            yield dict(self._clip)
 
 
 def text_chat(system, user, images):
@@ -246,3 +248,48 @@ def test_estimate_fresh_project_matches_formula(tmp_path, song):
     p.save_shots([Shot(f"s{i:02d}", a, b, s, "a person walks", ["A"], "P", "wide shot") for i, (a, b, s) in enumerate(windows, 1)], "x")
     n = 8
     assert estimate(p) == pytest.approx(n * EST_STILL_S * GPU_PRICE["L40S"] + (n * 3 + 1) * EST_WALL_S * GPU_PRICE["L4"])
+
+
+class DiesOnThirdClip(CountingGen):
+    """Yields two clips, then the batch dies the way a killed run does; records the ledger as each batch starts."""
+
+    def __init__(self, ledger_path):
+        super().__init__()
+        self.ledger_path, self.seen = ledger_path, {}
+
+    def stills(self, jobs):
+        self.seen["stills"] = Ledger(self.ledger_path).rows()
+        yield from super().stills(jobs)
+
+    def clips(self, jobs):
+        self.seen["clips"] = Ledger(self.ledger_path).rows()
+        for n, res in enumerate(super().clips(jobs)):
+            if n == 2:
+                raise RuntimeError("killed")
+            yield res
+
+
+def test_finished_clips_survive_a_dying_batch(tmp_path, song):
+    p = make(tmp_path, song)
+    gen = DiesOnThirdClip(p.ledger_path)
+    with pytest.raises(RuntimeError, match="killed"):
+        run_auto(p, gen)
+    rows = [r for r in Ledger(p.ledger_path).rows() if r.get("model") == "ltx-2.5-draft"]
+    assert len(rows) == 2 and all(Path(r["output"]).is_file() for r in rows)
+    # the reservation is in the ledger before the first result is consumed, so a hard kill leaves the estimate charged
+    [rs] = [r for r in gen.seen["stills"] if r.get("model") == "reserve"]
+    assert (rs["gpu"], rs["wall_s"]) == ("L40S", EST_STILL_S * 9)
+    [rc] = [r for r in gen.seen["clips"] if r.get("model") == "reserve" and r["gpu"] == "L4"]
+    assert rc["wall_s"] == EST_WALL_S * 25
+    reserve = [r["wall_s"] for r in Ledger(p.ledger_path).rows() if r.get("model") == "reserve"]
+    assert len(reserve) == 4 and sum(reserve) == 0  # each batch's finally settles its reservation
+    assert any(r.get("model") == "overhead" for r in Ledger(p.ledger_path).rows())
+
+
+def test_clean_run_spend_nets_to_actuals(tmp_path, song):
+    p = make(tmp_path, song)
+    run_auto(p)
+    led = Ledger(p.ledger_path)
+    actual = sum(r["wall_s"] * GPU_PRICE[r["gpu"]] for r in led.rows() if r.get("kind") == "job" and r["model"] != "reserve")
+    assert led.spent_usd() == pytest.approx(3 + actual)
+    assert led.rounds("s01") == [1]

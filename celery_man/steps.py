@@ -4,7 +4,8 @@ import hashlib
 import logging
 import os
 import time
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +21,7 @@ log = logging.getLogger(__name__)
 
 EST_WALL_S = 260  # per L4 draft take, and once more per run for the container load
 EST_STILL_S = 20  # per FLUX still on the L40S
-STILL_MODEL, TAKE_MODEL, OVERHEAD_MODEL = "flux-schnell", "ltx-2.5-draft", "overhead"
+STILL_MODEL, TAKE_MODEL, OVERHEAD_MODEL, RESERVE_MODEL = "flux-schnell", "ltx-2.5-draft", "overhead", "reserve"
 STILL_GPU, TAKE_GPU = "L40S", "L4"
 SEEDS = (1, 2, 3)
 IN_POINT = 0.5
@@ -95,6 +96,19 @@ def _row(**kw) -> dict:
     return {"kind": "job", "ts": time.time()} | kw
 
 
+@contextmanager
+def reserved(led: Ledger, gpu: str, wall_s: float) -> Iterator[None]:
+    """Charge a batch's estimate before it launches and refund it in the finally: a hard kill leaves the estimate charged,
+    a finished batch nets to its actual rows."""
+    row = {"key": f"reserve-{time.time_ns()}", "shot": "", "gen": 0, "round": 0, "seed": 0, "model": RESERVE_MODEL, "gpu": gpu,
+           "prompt": "", "keyframe": "", "output": None}  # fmt: skip
+    led.append(_row(**row, wall_s=wall_s))
+    try:
+        yield
+    finally:
+        led.append(_row(**row, wall_s=-wall_s))
+
+
 def _write_bytes(dest: Path, data: bytes) -> None:
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(data)
@@ -124,8 +138,8 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
     with led.locked():
         if not led.can_afford(cost(len(jobs), EST_STILL_S, STILL_GPU)):
             raise BudgetError(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
-        results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
-        try:
+        with reserved(led, STILL_GPU, EST_STILL_S * (len(jobs) + 1)):
+            results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
             for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
                 row = {"key": job_key(s.id, seed, pr, b""), "shot": s.id, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
                 if isinstance(res, BaseException):
@@ -143,8 +157,7 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
                     "approved": approved,
                     "note": note,
                 }
-        finally:
-            write_json(p.keyframes_path, kfs)  # finished stills stay recorded even if a later one breaks the loop
+                write_json(p.keyframes_path, kfs)  # each still is recorded as it lands, so a kill keeps the finished ones
     return failed
 
 

@@ -30,6 +30,7 @@ from celery_man.steps import (
     _row,
     _write_bytes,
     kf_need,
+    reserved,
     shots_inputs,
 )
 
@@ -115,31 +116,32 @@ def sheet(p: Project, key: str) -> Path | None:
 
 
 def _run_takes(run: Run, jobs: list[tuple[Shot, str, int, TakePlan]], model: str = TAKE_MODEL) -> None:
-    """Paper-machine's pattern: file first then its ledger row, failures billed at EST_WALL_S, overhead row in finally.
-    Sheets come after every file and row is written, so one bad clip never loses the rest of the batch."""
+    """Paper-machine's pattern: each clip's file then its ledger row as it lands, failures billed at EST_WALL_S, the batch's
+    estimate reserved up front, overhead row in finally. Sheets come after the batch, so one bad clip never loses the rest."""
     p, led, written = run.p, run.led, []
     p.takes_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU)):  # +1 reserves the run's container load
             raise BudgetError(f"{len(jobs)} takes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         in_call, t0 = 0.0, time.monotonic()
-        try:
-            results = run.generator().clips([ClipJob(s.id, key, pl.prompt, seed, pl.kf) for s, key, seed, pl in jobs])
-            for (s, key, seed, pl), res in zip(jobs, results, strict=True):
-                row = {"key": key, "shot": s.id, "gen": pl.gen, "round": pl.round, "seed": seed, "model": model, "prompt": pl.prompt}
-                row["keyframe"] = str(pl.kf_path.resolve())
-                if isinstance(res, BaseException):
-                    log.error("take %s failed: %r", key, res)
-                    led.append(_row(**row, output=None, gpu=TAKE_GPU, wall_s=EST_WALL_S, failed=True, error=repr(res)))
-                    continue
-                dest = (p.takes_dir / f"{key}.mp4").resolve()
-                _write_bytes(dest, res["mp4"])
-                led.append(_row(**row, output=str(dest), gpu=res["gpu"], wall_s=res["wall_s"]))
-                in_call += res["wall_s"]
-                written.append(key)
-        finally:
-            led.append(_row(key=f"run-{int(t0)}", shot="", gen=0, round=0, seed=0, model=OVERHEAD_MODEL, gpu=TAKE_GPU, prompt="",
-                            keyframe="", output=None, wall_s=max(0.0, time.monotonic() - t0 - in_call)))  # fmt: skip
+        with reserved(led, TAKE_GPU, EST_WALL_S * (len(jobs) + 1)):
+            try:
+                results = run.generator().clips([ClipJob(s.id, key, pl.prompt, seed, pl.kf) for s, key, seed, pl in jobs])
+                for (s, key, seed, pl), res in zip(jobs, results, strict=True):
+                    row = {"key": key, "shot": s.id, "gen": pl.gen, "round": pl.round, "seed": seed, "model": model, "prompt": pl.prompt}
+                    row["keyframe"] = str(pl.kf_path.resolve())
+                    if isinstance(res, BaseException):
+                        log.error("take %s failed: %r", key, res)
+                        led.append(_row(**row, output=None, gpu=TAKE_GPU, wall_s=EST_WALL_S, failed=True, error=repr(res)))
+                        continue
+                    dest = (p.takes_dir / f"{key}.mp4").resolve()
+                    _write_bytes(dest, res["mp4"])
+                    led.append(_row(**row, output=str(dest), gpu=res["gpu"], wall_s=res["wall_s"]))
+                    in_call += res["wall_s"]
+                    written.append(key)
+            finally:
+                led.append(_row(key=f"run-{int(t0)}", shot="", gen=0, round=0, seed=0, model=OVERHEAD_MODEL, gpu=TAKE_GPU, prompt="",
+                                keyframe="", output=None, wall_s=max(0.0, time.monotonic() - t0 - in_call)))  # fmt: skip
     for key in written:
         sheet(p, key)
 

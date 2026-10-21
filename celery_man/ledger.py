@@ -79,8 +79,8 @@ class Ledger:
         return self.spent_usd() + cost_usd <= self.cap_usd
 
     def rounds(self, shot_id: str) -> list[int]:
-        """Judged-take rounds for a shot; keyframes, quick takes and overhead rows are not rounds."""
-        skip = {"flux-schnell", "quick", "overhead"}
+        """Judged-take rounds for a shot; keyframes, quick takes, overhead and reserve rows are not rounds."""
+        skip = {"flux-schnell", "quick", "overhead", "reserve"}
         return sorted(
             {
                 r["round"]

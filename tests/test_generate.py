@@ -26,15 +26,15 @@ def test_fake_clip_is_5_04s_960x544(tmp_path):
 
 def test_fake_failure_returned_not_raised():
     gen = FakeGenerator(fail={"bad"})
-    out = gen.stills([StillJob("ok", "a person walks", 1), StillJob("bad", "a person walks", 2)])
+    out = list(gen.stills([StillJob("ok", "a person walks", 1), StillJob("bad", "a person walks", 2)]))
     assert out[0]["gpu"] == "L40S" and out[0]["png"].startswith(b"\x89PNG")
     assert isinstance(out[1], RuntimeError)
-    assert isinstance(gen.clips([ClipJob("bad", "k", "p", 1, b"")])[0], RuntimeError)
+    assert isinstance(next(gen.clips([ClipJob("bad", "k", "p", 1, b"")])), RuntimeError)
 
 
 def test_results_in_job_order():
     gen = FakeGenerator(fail={"b"})
-    out = gen.stills([StillJob(i, "a person walks", n) for n, i in enumerate("abc")])
+    out = list(gen.stills([StillJob(i, "a person walks", n) for n, i in enumerate("abc")]))
     assert [isinstance(r, BaseException) for r in out] == [False, True, False]
     assert out[0]["png"] != out[2]["png"]  # colour comes from the seed
 
