@@ -9,7 +9,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from celery_man import auto
+from celery_man import auto, features
 from celery_man.assemble import assemble
 from celery_man.compose import compose, prompt_sha
 from celery_man.generate import Generator, StillJob
@@ -118,6 +118,7 @@ def _write_bytes(dest: Path, data: bytes) -> None:
 
 def run_timing(run: Run) -> None:
     write_json(run.p.timing_path, detect(run.p.song))
+    features.ensure(run.p)
 
 
 def run_brief(run: Run) -> None:

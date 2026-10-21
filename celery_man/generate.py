@@ -13,6 +13,7 @@ from typing import Protocol
 
 Result = dict | BaseException  # {"png"|"mp4": bytes, "wall_s": float, "gpu": str}, or the exception that job raised
 W, H = 960, 544
+FPS = 24
 
 
 @dataclass(frozen=True)

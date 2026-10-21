@@ -16,6 +16,8 @@ from pathlib import Path
 
 import modal
 
+from celery_man.generate import FPS
+
 LTX = "Lightricks/LTX-2.5-Diffusers"
 FLUX = "black-forest-labs/FLUX.1-schnell"
 # diffusers folders only; skips the 23 GB single-file flux1-schnell.safetensors at the repo root
@@ -42,7 +44,7 @@ LTX_PATTERNS = [
         )
     ),
 ]
-W, H, FPS, FRAMES = 960, 544, 24, 121
+W, H, FRAMES = 960, 544, 121
 ANIMATOR_GPU = "L4"  # smallest card that works with group offload: 960x544 draft in ~175 s (2026-10-17)
 ANIMATOR_MEMORY_GIB = 88  # CPU RAM holds the offloaded weights (77 GiB peak measured); Modal bills $0.008/GiB/h
 
