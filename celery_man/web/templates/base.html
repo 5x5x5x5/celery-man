@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% block head %}{% endblock %}
+<title>{% block title %}{% endblock %} · celery-man</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="mark" href="/">celery-man</a>
+  <nav>
+    {% for href, label in [("/", "Overview"), ("/brief", "Brief"), ("/shots", "Shots"), ("/keyframes", "Keyframes"), ("/takes", "Takes")] %}
+    <a href="{{ href }}"{% if request.url.path == href %} aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+</header>
+<main>
+{% if auto %}<p class="note">This step is set by auto — switch this step to tastemaker to edit.</p>{% endif %}
+{% block main %}{% endblock %}
+</main>
+</body>
+</html>

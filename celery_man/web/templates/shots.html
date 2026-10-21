@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Shots{% endblock %}
+{% block main %}
+<h1>Shots</h1>
+{% if not timing %}
+<p>Run once to analyse the song. <a href="/">Go to the overview</a>.</p>
+{% elif not brief %}
+<p>Save the <a href="/brief">brief</a> first: shots draw on its cast and places.</p>
+{% else %}
+<form method="post" action="/shots">
+<fieldset{% if auto %} disabled{% endif %}>
+<table class="shots">
+  <thead><tr><th>Shot</th><th>Action</th><th>Cast</th><th>Place</th><th>Framing</th><th>Tokens</th></tr></thead>
+  <tbody>
+  {% for r in rows %}{% set s = r.s %}
+  <tr id="{{ s.id }}"{% if r.error %} class="has-error"{% endif %}>
+    <td data-label="Shot"><strong>{{ s.id }}</strong><br><span class="time">{{ "%.2f"|format(s.start) }}–{{ "%.2f"|format(s.end) }}</span> · {{ s.section }}</td>
+    <td data-label="Action"><textarea name="action_{{ s.id }}" rows="2" aria-label="{{ s.id }} action">{{ s.action }}</textarea></td>
+    <td data-label="Cast">{% for c in brief.cast %}
+      <label class="check"><input type="checkbox" name="cast_{{ s.id }}" value="{{ c.name }}"{% if c.name in s.cast %} checked{% endif %}> {{ c.name }}</label>
+    {% endfor %}</td>
+    <td data-label="Place"><select name="place_{{ s.id }}" aria-label="{{ s.id }} place">
+      <option value="">none</option>
+      {% for pl in brief.places %}<option{% if pl.name == s.place %} selected{% endif %}>{{ pl.name }}</option>{% endfor %}
+    </select></td>
+    <td data-label="Framing"><input name="framing_{{ s.id }}" value="{{ s.framing }}" aria-label="{{ s.id }} framing"></td>
+    <td data-label="Tokens" class="tokens{% if r.tokens and r.tokens > limit %} over{% endif %}">{{ r.tokens if r.tokens is not none else "?" }} / {{ limit }}</td>
+  </tr>
+  {% if r.error %}<tr class="row-error"><td colspan="6"><p class="error">{{ s.id }}: {{ r.error }}</p></td></tr>{% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+<button class="primary" type="submit">Save shots</button>
+</fieldset>
+</form>
+{% endif %}
+{% endblock %}

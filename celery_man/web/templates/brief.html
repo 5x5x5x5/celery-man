@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Brief{% endblock %}
+{% macro rows(kind, items) %}
+  {% for it in items %}
+  <div class="pair">
+    <input name="{{ kind }}_name" value="{{ it.name }}" placeholder="name" aria-label="{{ kind }} name">
+    <input name="{{ kind }}_description" value="{{ it.description }}" placeholder="description" aria-label="{{ kind }} description">
+  </div>
+  {% endfor %}
+{% endmacro %}
+{% block main %}
+<h1>Brief</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/brief">
+<fieldset{% if auto %} disabled{% endif %}>
+  <section>
+    <label for="logline">Logline</label>
+    <textarea id="logline" name="logline" rows="2">{{ b.logline }}</textarea>
+  </section>
+  <section>
+    <h2>Style</h2>
+    {% for k in style_keys %}
+    <label for="{{ k }}">{{ k }}</label>
+    <input id="{{ k }}" name="{{ k }}" value="{{ b.style[k] }}">
+    {% endfor %}
+  </section>
+  <section>
+    <h2>Cast</h2>
+    {{ rows("cast", cast) }}
+  </section>
+  <section>
+    <h2>Places</h2>
+    {{ rows("place", places) }}
+  </section>
+  <section>
+    <label for="avoid">Avoid <small>one per line</small></label>
+    <textarea id="avoid" name="avoid" rows="3">{{ b.avoid|join("\n") }}</textarea>
+  </section>
+  <button class="primary" type="submit">Save brief</button>
+</fieldset>
+</form>
+{% endblock %}
