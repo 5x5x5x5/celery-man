@@ -102,6 +102,14 @@ def _window_mismatch(p: Project, shots: list[Shot]) -> str:
     return ""
 
 
+def _kind_problem(p: Project, shots: list[Shot]) -> str:
+    """The first shot whose kind the project does not allow, or ""."""
+    for s in shots:
+        if s.kind not in p.kinds:
+            return f"{s.id} is {s.kind}; this project allows {', '.join(p.kinds)}"
+    return ""
+
+
 def status(p: Project) -> list[StepState]:
     timing, brief_d = read_json(p.timing_path), read_json(p.brief_path)
     out = [StepState("timing", "missing" if timing is None else "done" if timing["song_sha"] == steps.song_sha(p) else "stale")]
@@ -110,7 +118,7 @@ def status(p: Project) -> list[StepState]:
     brief = p.load_brief()
     fresh = None if shots_d is None or brief is None or timing is None else shots_d["inputs"] == steps.shots_inputs(p, brief)
     shots = p.load_shots()
-    mismatch = _window_mismatch(p, shots) if fresh else ""
+    mismatch = (_window_mismatch(p, shots) or _kind_problem(p, shots)) if fresh else ""
     out.append(_decision(p, "shots", fresh and not mismatch))
     out[-1].detail = mismatch or out[-1].detail
     if brief is None or not shots:

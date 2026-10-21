@@ -50,7 +50,8 @@ def windows(p: Project) -> list[tuple[float, float, str]]:
 
 def shots_inputs(p: Project, brief: Brief) -> str:
     """R2: only names reach shot text, so a style or description edit leaves shots fresh."""
-    return sha12([windows(p), sorted(c.name for c in brief.cast), sorted(x.name for x in brief.places)])
+    parts = [windows(p), sorted(c.name for c in brief.cast), sorted(x.name for x in brief.places)]
+    return sha12(parts if p.kinds == ["footage"] else [*parts, sorted(p.kinds)])
 
 
 # --- per-shot needs --------------------------------------------------------------------------------

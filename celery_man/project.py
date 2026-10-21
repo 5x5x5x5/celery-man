@@ -4,11 +4,17 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 STYLE_KEYS = ("medium", "palette", "lighting", "camera")
+KINDS = ("footage", "animation")
+TYPEFACES = ("serif", "sans", "mono", "display")
+DEFAULT_LOOK = {"background": "#f4efe6", "colors": ["#1d1b18"], "typeface": "serif"}
+SCENE_FILE = re.compile(r"^scenes/[A-Za-z0-9_-]+\.js$")
+HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 DEFAULT_MODES = {"brief": "tastemaker", "shots": "tastemaker", "keyframes": "tastemaker", "takes": "tastemaker"}
 
 
@@ -47,6 +53,7 @@ class Brief:
     cast: list[CastMember]
     places: list[Place]
     avoid: list[str]
+    look: dict = field(default_factory=lambda: dict(DEFAULT_LOOK))
 
 
 @dataclass
@@ -59,6 +66,8 @@ class Shot:
     cast: list[str]
     place: str | None
     framing: str
+    kind: str = "footage"
+    scene: dict | None = None
 
 
 @dataclass
@@ -91,8 +100,25 @@ def _named(items, cls, what: str) -> list:
     return out
 
 
+def look_from_dict(d) -> dict:
+    _exact(d, tuple(DEFAULT_LOOK), "look")
+    if not isinstance(d["background"], str) or not HEX.match(d["background"]):
+        raise ValueError(f"look.background: expected #rrggbb, got {d['background']!r}")
+    _is(d["colors"], list, "look.colors")
+    if not 1 <= len(d["colors"]) <= 5:
+        raise ValueError(f"look.colors: expected 1 to 5 colours, got {len(d['colors'])}")
+    for c in d["colors"]:
+        if not isinstance(c, str) or not HEX.match(c):
+            raise ValueError(f"look.colors: expected #rrggbb, got {c!r}")
+    if d["typeface"] not in TYPEFACES:
+        raise ValueError(f"look.typeface: expected one of {TYPEFACES}, got {d['typeface']!r}")
+    return {"background": d["background"], "colors": list(d["colors"]), "typeface": d["typeface"]}
+
+
 def brief_from_dict(d) -> Brief:
-    _exact(d, ("logline", "style", "cast", "places", "avoid"), "brief")
+    if isinstance(d, dict) and "look" not in d:
+        d = {**d, "look": dict(DEFAULT_LOOK)}
+    _exact(d, ("logline", "style", "cast", "places", "avoid", "look"), "brief")
     _is(d["logline"], str, "logline")
     _exact(d["style"], STYLE_KEYS, "style")
     for k in STYLE_KEYS:
@@ -101,12 +127,40 @@ def brief_from_dict(d) -> Brief:
     for a in d["avoid"]:
         _is(a, str, "avoid")
     return Brief(
-        d["logline"], dict(d["style"]), _named(d["cast"], CastMember, "cast"), _named(d["places"], Place, "places"), list(d["avoid"])
+        d["logline"],
+        dict(d["style"]),
+        _named(d["cast"], CastMember, "cast"),
+        _named(d["places"], Place, "places"),
+        list(d["avoid"]),
+        look_from_dict(d["look"]),
     )
 
 
+def _scene(d) -> dict:
+    from celery_man import templates
+
+    if not isinstance(d, dict) or not {"params"} <= set(d) <= {"template", "file", "params", "note"} or ("template" in d) == ("file" in d):
+        raise ValueError('scene: expected an object with "params" and exactly one of "template" or "file" (optional "note")')
+    _is(d["params"], dict, "scene.params")
+    if "note" in d:
+        _is(d["note"], str, "scene.note")
+    if "file" in d:
+        if not isinstance(d["file"], str) or not SCENE_FILE.match(d["file"]):
+            raise ValueError(f"scene.file: expected scenes/<name>.js, got {d['file']!r}")
+        return dict(d)
+    _is(d["template"], str, "scene.template")
+    return {**d, "params": templates.validate_params(d["template"], d["params"])}
+
+
 def shot_from_dict(d) -> Shot:
-    _exact(d, ("id", "start", "end", "section", "action", "cast", "place", "framing"), "shot")
+    if isinstance(d, dict):
+        d = {"kind": "footage", "scene": None} | d
+    _exact(d, ("id", "start", "end", "section", "action", "cast", "place", "framing", "kind", "scene"), "shot")
+    if d["kind"] not in KINDS:
+        raise ValueError(f"kind: expected one of {KINDS}, got {d['kind']!r}")
+    if (d["kind"] == "animation") != (d["scene"] is not None):
+        raise ValueError("scene: required for animation shots and not allowed on footage shots")
+    scene = None if d["scene"] is None else _scene(d["scene"])
     for k in ("id", "section", "action", "framing"):
         _is(d[k], str, k)
     for k in ("start", "end"):
@@ -118,7 +172,9 @@ def shot_from_dict(d) -> Shot:
         _is(c, str, "cast")
     if d["place"] is not None:
         _is(d["place"], str, "place")
-    return Shot(d["id"], float(d["start"]), float(d["end"]), d["section"], d["action"], list(d["cast"]), d["place"], d["framing"])
+    return Shot(
+        d["id"], float(d["start"]), float(d["end"]), d["section"], d["action"], list(d["cast"]), d["place"], d["framing"], d["kind"], scene
+    )
 
 
 class NoProject(FileNotFoundError):
@@ -136,7 +192,7 @@ class Project:
             raise NoProject(f"no project in {self.root} (no project.json); create one with `celery-man new`")
 
     @classmethod
-    def create(cls, root: Path, song: Path, song_source: str) -> "Project":
+    def create(cls, root: Path, song: Path, song_source: str, kinds: tuple[str, ...] = ("footage",)) -> "Project":
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         shutil.copy2(song, root / Path(song).name)
@@ -150,6 +206,7 @@ class Project:
                 "cap_usd": 25,
                 "modes": dict(DEFAULT_MODES),
                 "seed": "",
+                "kinds": list(kinds),
                 "models": {"text": dict(local), "vision": dict(local)},
             },
         )
@@ -176,6 +233,10 @@ class Project:
         return self.config["range"]
 
     @property
+    def kinds(self) -> list[str]:
+        return self.config.get("kinds", ["footage"])
+
+    @property
     def models(self) -> dict:
         return {k: ModelCfg(**v) for k, v in self.config["models"].items()}
 
@@ -189,6 +250,10 @@ class Project:
     takes_dir = property(lambda self: self.root / "takes")
     sheets_dir = property(lambda self: self.root / "sheets")
     out_dir = property(lambda self: self.root / "out")
+    renders_path = property(lambda self: self.root / "renders.json")
+    renders_dir = property(lambda self: self.root / "renders")
+    scenes_dir = property(lambda self: self.root / "scenes")
+    features_path = property(lambda self: self.root / "features.json")
 
     def load_brief(self) -> Brief | None:
         d = read_json(self.brief_path)
@@ -207,3 +272,11 @@ class Project:
 
     def save_shots(self, shots: list[Shot], inputs: str) -> None:
         write_json(self.shots_path, {"inputs": inputs, "shots": [asdict(s) for s in shots]})
+
+    def load_footage(self) -> list[Shot] | None:
+        shots = self.load_shots()
+        return None if shots is None else [s for s in shots if s.kind == "footage"]
+
+    def load_animation(self) -> list[Shot] | None:
+        shots = self.load_shots()
+        return None if shots is None else [s for s in shots if s.kind == "animation"]
