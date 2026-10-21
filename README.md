@@ -31,7 +31,7 @@ uv run celery-man quick projects/mine      # one cheap take per shot, whole song
 uv run celery-man status projects/mine
 ```
 
-`modes` takes `STEP=MODE` pairs; steps are `brief`, `shots`, `keyframes`, `takes`; modes are `tastemaker` or `auto`. New projects start all-tastemaker. `run` and `quick` ask before spending; `--yes` skips the question. `run` stops (exit 2) when a tastemaker decision is waiting; make it in the web page, then run again. Reruns never regenerate a finished take. Editing the brief marks keyframes and picks stale, and nothing regenerates until you run again. `serve --port N` changes the port; the server binds to 127.0.0.1 only.
+`modes` takes `STEP=MODE` pairs; steps are `brief`, `shots`, `keyframes`, `takes`; modes are `tastemaker` or `auto`. New projects start all-tastemaker. `run` and `quick` ask before spending; `--yes` skips the question. `run` stops and exits 0 when a tastemaker decision is waiting; make it in the web page, then run again. `quick` exits 2 in that case. Reruns never regenerate a finished take. Editing the brief marks keyframes and picks stale, and nothing regenerates until you run again. `serve --port N` changes the port; the server binds to 127.0.0.1 only.
 
 ## Project folder
 
@@ -63,9 +63,9 @@ Any OpenAI-compatible endpoint works. `api_key_env` names the environment variab
 
 ## Costs
 
-- A draft clip on an L4 costs about $0.07.
-- A 3.5-minute song costs about $4 for `quick` and about $11 per judged round.
-- The cap is $25 per project (`cap_usd`). When the cap runs out between rounds, each unfinished shot gets one quick take and the video still assembles. `run` refuses to start if a quick pass over the range cannot fit.
+- A draft clip on an L4 costs roughly $0.07.
+- A 3.5-minute song costs roughly $4 for `quick` and roughly $11 per judged round.
+- The cap is $25 per project (`cap_usd`). When the cap runs out between rounds, each unfinished shot gets one quick take and the video still assembles. `run` refuses before its first spend if a quick pass over the range cannot fit.
 
 ## Limits
 
