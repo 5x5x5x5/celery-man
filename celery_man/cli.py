@@ -10,15 +10,16 @@ from celery_man.auto import AutoError, ChatFn
 from celery_man.compose import PromptTooLong
 from celery_man.generate import Generator, ModalGenerator
 from celery_man.ledger import Ledger
-from celery_man.pipeline import WaitingError, advance, estimate, quick, quick_cost, status
-from celery_man.project import Project, write_json
+from celery_man.pipeline import BusyError, Declined, WaitingError, advance, estimate, quick, status
+from celery_man.project import NoProject, Project, write_json
 from celery_man.steps import BudgetError
 from celery_man.timing import TimingError
 
 log = logging.getLogger("celery_man")
 DECISIONS = ("brief", "shots", "keyframes", "takes")
 MODES = ("tastemaker", "auto")
-REFUSED = (BudgetError, TimingError, PromptTooLong, AutoError, WaitingError)
+# exit 2: the project or the user must change something first (bad project files raise ValueError); exit 1: a run failed
+REFUSED = (BudgetError, TimingError, PromptTooLong, AutoError, WaitingError, BusyError, NoProject, ValueError, EOFError)
 
 
 def make_generator() -> Generator:
@@ -37,8 +38,17 @@ def _status_lines(p: Project) -> None:
 
 
 def _confirm(cost: float, yes: bool) -> bool:
+    """Asked at the spend gate, once the brief and shots exist. EOF (no terminal) declines by raising: exit 2, nothing spent."""
     log.info("estimate $%.2f", cost)
-    return yes or input("Proceed? [y/N] ").strip().lower() in ("y", "yes")
+    if yes:
+        return True
+    try:
+        ok = input("Proceed? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        raise EOFError("no answer at the prompt; nothing spent (pass --yes to run unattended)") from None
+    if not ok:
+        log.info("aborted")
+    return ok
 
 
 def _new(a) -> int:
@@ -65,10 +75,7 @@ def _modes(a) -> int:
 
 def _run(a) -> int:
     p = Project(a.dir)
-    if not _confirm(estimate(p), a.yes):
-        log.info("aborted")
-        return 1
-    sts = advance(p, make_generator(), *make_chats(p))
+    sts = advance(p, make_generator(), *make_chats(p), confirm=lambda c: _confirm(c, a.yes))
     for s in sts:
         log.info("%-10s %-8s %s", s.step, s.state, s.detail)
     return 0 if all(s.state in ("done", "waiting") for s in sts) else 1
@@ -76,10 +83,10 @@ def _run(a) -> int:
 
 def _quick(a) -> int:
     p = Project(a.dir)
-    if not _confirm(quick_cost(p), a.yes):
-        log.info("aborted")
+    try:
+        log.info("%s", quick(p, make_generator(), make_chats(p)[0], confirm=lambda c: _confirm(c, a.yes)))
+    except Declined:
         return 1
-    log.info("%s", quick(p, make_generator(), make_chats(p)[0]))
     return 0
 
 
@@ -119,6 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     except REFUSED as e:
         log.error("%s", e)
         return 2
-    except Exception as e:  # noqa: BLE001 - CLI boundary: report, exit 1
-        log.error("failed: %s", e)
+    except Exception:  # CLI boundary: report with the traceback, exit 1
+        log.exception("failed")
         return 1

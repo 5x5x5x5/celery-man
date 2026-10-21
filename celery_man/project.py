@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import shutil
 from dataclasses import asdict, dataclass, field
@@ -110,12 +111,18 @@ def shot_from_dict(d) -> Shot:
         _is(d[k], str, k)
     for k in ("start", "end"):
         _is(d[k], (int, float), k)
+        if not math.isfinite(d[k]):
+            raise ValueError(f"{k}: expected a finite number, got {d[k]}")
     _is(d["cast"], list, "cast")
     for c in d["cast"]:
         _is(c, str, "cast")
     if d["place"] is not None:
         _is(d["place"], str, "place")
     return Shot(d["id"], float(d["start"]), float(d["end"]), d["section"], d["action"], list(d["cast"]), d["place"], d["framing"])
+
+
+class NoProject(FileNotFoundError):
+    """The folder holds no project.json."""
 
 
 @dataclass
@@ -125,6 +132,8 @@ class Project:
 
     def __post_init__(self):
         self.root = Path(self.root)
+        if not (self.root / "project.json").is_file():
+            raise NoProject(f"no project in {self.root} (no project.json); create one with `celery-man new`")
 
     @classmethod
     def create(cls, root: Path, song: Path, song_source: str) -> "Project":
@@ -190,7 +199,11 @@ class Project:
 
     def load_shots(self) -> list[Shot] | None:
         d = read_json(self.shots_path)
-        return None if d is None else [shot_from_dict(s) for s in d["shots"]]
+        if d is None:
+            return None
+        if not isinstance(d, dict) or not isinstance(d.get("shots"), list):
+            raise ValueError(f'{self.shots_path}: expected an object with a "shots" list')  # noqa: TRY004 - a bad file, like the others
+        return [shot_from_dict(s) for s in d["shots"]]
 
     def save_shots(self, shots: list[Shot], inputs: str) -> None:
         write_json(self.shots_path, {"inputs": inputs, "shots": [asdict(s) for s in shots]})

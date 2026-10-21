@@ -1,15 +1,15 @@
 import io
 
 from celery_man import cli
-from celery_man.generate import FakeGenerator
-from celery_man.pipeline import status
-from celery_man.project import DEFAULT_MODES, Project, read_json
-from tests.test_pipeline import make, text_chat, vision_chat
+from celery_man.ledger import Ledger
+from celery_man.pipeline import estimate, run_lock, status
+from celery_man.project import DEFAULT_MODES, Project, read_json, write_json
+from tests.test_pipeline import CountingGen, make, text_chat, vision_chat
 
 
 def patch(monkeypatch, gens):
     def make_gen():
-        gens.append(FakeGenerator())
+        gens.append(CountingGen())
         return gens[-1]
 
     monkeypatch.setattr(cli, "make_generator", make_gen)
@@ -37,13 +37,45 @@ def test_modes_rejects_unknown_step(tmp_path, song):
     assert read_json(d / "project.json")["modes"]["brief"] == "auto"
 
 
-def test_run_without_yes_aborts_on_n(tmp_path, song, monkeypatch):
+def no_spend(p, gens) -> bool:
+    jobs = [r for r in Ledger(p.ledger_path).rows() if r.get("kind") == "job"]
+    return not jobs and all(g.stills_n == g.clips_n == [] for g in gens)
+
+
+def test_run_without_yes_aborts_on_n(tmp_path, song, monkeypatch, caplog):
     gens = []
     patch(monkeypatch, gens)
-    p = make(tmp_path, song, DEFAULT_MODES)
+    p = make(tmp_path, song)
     monkeypatch.setattr("sys.stdin", io.StringIO("n\n"))
+    caplog.set_level("INFO")
     assert cli.main(["run", str(p.root)]) == 1
-    assert not p.brief_path.exists()
+    assert p.shots_path.exists() and no_spend(p, gens)  # asked at the spend gate, after the brief and shots exist
+    assert f"estimate ${estimate(p):.2f}" in caplog.text and estimate(p) > 0
+
+
+def test_run_eof_at_prompt_declines_and_exits_2(tmp_path, song, monkeypatch):
+    gens = []
+    patch(monkeypatch, gens)
+    p = make(tmp_path, song)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert cli.main(["run", str(p.root)]) == 2
+    assert no_spend(p, gens)
+
+
+def test_quick_declined_exits_1(tmp_path, song, monkeypatch):
+    gens = []
+    patch(monkeypatch, gens)
+    p = make(tmp_path, song)
+    monkeypatch.setattr("sys.stdin", io.StringIO("n\n"))
+    assert cli.main(["quick", str(p.root)]) == 1
+    assert no_spend(p, gens)
+
+
+def test_busy_project_exits_2(tmp_path, song, monkeypatch):
+    patch(monkeypatch, [])
+    p = make(tmp_path, song)
+    with run_lock(p):
+        assert cli.main(["run", str(p.root), "--yes"]) == 2
 
 
 def test_run_yes_all_auto_to_video(tmp_path, song, monkeypatch):
@@ -52,7 +84,7 @@ def test_run_yes_all_auto_to_video(tmp_path, song, monkeypatch):
     p = make(tmp_path, song)
     assert cli.main(["run", str(p.root), "--yes"]) == 0
     assert all(s.state == "done" for s in status(p))
-    assert (p.out_dir / "final.mp4").exists() or list(p.out_dir.glob("*.mp4"))
+    assert (p.out_dir / "video.mp4").exists() and (p.out_dir / "report.md").exists()
 
 
 def test_run_waiting_is_not_failure(tmp_path, song, monkeypatch):
@@ -65,3 +97,11 @@ def test_quick_waiting_exits_2(tmp_path, song, monkeypatch):
     patch(monkeypatch, [])
     p = make(tmp_path, song, DEFAULT_MODES)
     assert cli.main(["quick", str(p.root), "--yes"]) == 2
+
+
+def test_missing_dir_and_bad_shots_exit_2(tmp_path, song, caplog):
+    assert cli.main(["status", str(tmp_path / "nope")]) == 2
+    assert str(tmp_path / "nope") in caplog.text
+    p = make(tmp_path, song)
+    write_json(p.shots_path, {"inputs": "x"})
+    assert cli.main(["status", str(p.root)]) == 2

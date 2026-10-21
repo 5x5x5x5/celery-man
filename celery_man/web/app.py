@@ -1,6 +1,7 @@
 """Tastemaker web page: the app, the overview (status, modes, run) and the project file server. Decision pages: pages.py."""
 
 import logging
+import math
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -11,7 +12,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from celery_man.ledger import Ledger
-from celery_man.pipeline import advance, estimate, status
+from celery_man.pipeline import advance, estimate, run_busy, status
 from celery_man.project import DEFAULT_MODES, Project, write_json
 from celery_man.web.pages import guard_run, render, router
 
@@ -71,7 +72,8 @@ def create_app(project: Project, gen_factory: Callable, chat_factory: Callable) 
         p, runner = project, app.state.runner
         try:
             cap, modes = p.cap_usd, p.modes
-            sts, est, spent, err = status(p), estimate(p), Ledger(p.ledger_path, cap).spent_usd(), ""
+            est = estimate(p) if p.shots_path.exists() else None  # None: known only once the shots are written
+            sts, spent, err = status(p), Ledger(p.ledger_path, cap).spent_usd(), ""
         except Exception as e:  # noqa: BLE001 - show a broken project file instead of a 500
             sts, est, spent, cap, modes, err = [], 0.0, 0.0, 0.0, {}, f"{type(e).__name__}: {e}"
         return render(request, "overview.html", steps=sts, est=est, spent=spent, cap=cap, modes=modes, choices=MODES,
@@ -88,8 +90,23 @@ def create_app(project: Project, gen_factory: Callable, chat_factory: Callable) 
         return RedirectResponse("/", 303)
 
     @app.post("/run")
-    def run():
-        if not app.state.runner.start(lambda: advance(project, gen_factory(), *chat_factory(project))):
+    async def run(request: Request):
+        raw, runner = (await request.form()).get("shown", ""), app.state.runner
+        try:
+            shown = float(raw) if raw else math.nan  # nan: no estimate was shown, so the run stops at the spend gate
+        except ValueError:
+            raise HTTPException(400, "shown must be a number") from None
+        if math.isinf(shown):
+            raise HTTPException(400, "shown must be finite")
+
+        def confirm(cost: float) -> bool:
+            """The spend gate: go on only within a cent of the estimate the page showed when Run was pressed."""
+            if cost <= shown + 0.01:
+                return True
+            runner.error = f"stopped before spending: the estimate is now ${cost:.2f}; run again to accept it"
+            return False
+
+        if run_busy(project) or not runner.start(lambda: advance(project, gen_factory(), *chat_factory(project), confirm=confirm)):
             raise HTTPException(409, "a run is already going")
         return RedirectResponse("/", 303)
 

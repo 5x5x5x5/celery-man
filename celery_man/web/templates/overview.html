@@ -29,11 +29,15 @@
 <section>
   <h2>Budget</h2>
   <p class="figures"><span>Spent ${{ "%.2f"|format(spent) }} of ${{ "%.2f"|format(cap) }}</span>
-     <span>Next run ≈${{ "%.2f"|format(est) }}</span></p>
+     <span>{% if est is none %}Next run: estimate after shots are written{% else %}Next run ≈${{ "%.2f"|format(est) }}{% endif %}</span></p>
   {% if running %}
   <p class="running">running… this page refreshes every 5 seconds.</p>
   {% else %}
-  <form method="post" action="/run"><button class="primary" type="submit">Run (≈${{ "%.2f"|format(est) }})</button></form>
+  <form method="post" action="/run">
+    <input type="hidden" name="shown" value="{% if est is not none %}{{ "%.2f"|format(est) }}{% endif %}">
+    {% if est is none %}<button class="primary" type="submit">Run (stops before spending)</button>
+    {% else %}<button class="primary" type="submit">Run (≈${{ "%.2f"|format(est) }})</button>{% endif %}
+  </form>
   {% endif %}
 </section>
 {% endblock %}

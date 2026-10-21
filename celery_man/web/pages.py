@@ -8,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from celery_man.compose import TOKEN_LIMIT, PromptTooLong, compose, count_tokens
 from celery_man.ledger import Ledger
+from celery_man.pipeline import run_busy
 from celery_man.project import STYLE_KEYS, Project, Shot, brief_from_dict, read_json, write_json
 from celery_man.steps import IN_POINT, MAX_ROUND, TAKE_MODEL, brief_inputs, kf_need, shots_inputs, windows
 from celery_man.takes import TakePlan, sheet, take_plan
@@ -18,7 +19,7 @@ BLANK_ROWS = 3
 
 
 def render(request: Request, name: str, code: int = 200, **ctx):
-    ctx = ctx | {"limit": TOKEN_LIMIT, "running": request.app.state.runner.running}
+    ctx = ctx | {"limit": TOKEN_LIMIT, "running": _running(request)}
     return templates.TemplateResponse(request, name, ctx, status_code=code)
 
 
@@ -26,9 +27,14 @@ def _p(request: Request) -> Project:
     return request.app.state.p
 
 
+def _running(request: Request) -> bool:
+    """This server's run, or one from another process (the CLI) holding the project's run.lock."""
+    return request.app.state.runner.running or run_busy(_p(request))
+
+
 def guard_run(request: Request) -> None:
     """Every decision write: a run rewrites these files from what it read at its start, so a save now would be lost."""
-    if request.app.state.runner.running:
+    if _running(request):
         raise HTTPException(409, "a run is going; save when it finishes")
 
 

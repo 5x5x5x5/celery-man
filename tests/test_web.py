@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from celery_man.generate import FakeGenerator
 from celery_man.ledger import Ledger
-from celery_man.pipeline import advance
+from celery_man.pipeline import advance, estimate, run_lock
 from celery_man.project import DEFAULT_MODES, Brief, CastMember, Place, Shot, brief_from_dict, read_json, write_json
 from celery_man.steps import brief_inputs, shots_inputs, windows
 from celery_man.web.app import create_app
@@ -160,13 +160,13 @@ def test_second_run_conflicts(tmp_path, song):
 
     app = create_app(p, slow_gen, lambda p: (text_chat, vision_chat()))
     c = local(app)
-    assert c.post("/run", follow_redirects=False).status_code == 303
+    assert c.post("/run", data={"shown": "100"}, follow_redirects=False).status_code == 303
     assert "running" in c.get("/").text
-    assert c.post("/run").status_code == 409
+    assert c.post("/run", data={"shown": "100"}).status_code == 409
     go.set()
     app.state.runner.thread.join(10)
     assert made and read_json(p.keyframes_path)["s01"]["approved"] is None
-    assert c.post("/run", follow_redirects=False).status_code == 303
+    assert c.post("/run", data={"shown": "100"}, follow_redirects=False).status_code == 303
     app.state.runner.thread.join(10)
 
 
@@ -257,3 +257,42 @@ def test_files_route_blocks_symlink_out(tmp_path, song):
     (tmp_path / "secret.txt").write_text("x")
     (p.root / "link.txt").symlink_to(tmp_path / "secret.txt")
     assert client(p).get("/files/link.txt").status_code == 404
+
+
+def test_saves_and_runs_refused_while_another_process_runs(tmp_path, song):
+    p = project(tmp_path, song)
+    c = client(p)
+    with run_lock(p):
+        assert c.post("/brief", data={"logline": "x"}).status_code == 409
+        assert c.post("/run", data={"shown": "100"}).status_code == 409
+        assert "running" in c.get("/").text
+    assert not p.keyframes_path.exists()
+
+
+def run_once(app, c, **data):
+    assert c.post("/run", data=data, follow_redirects=False).status_code == 303
+    app.state.runner.thread.join(20)
+
+
+def test_run_stops_at_the_gate_when_the_estimate_rose(tmp_path, song):
+    p = project(tmp_path, song)
+    app = create_app(p, FakeGenerator, lambda p: (text_chat, vision_chat()))
+    c = local(app)
+    est = estimate(p)
+    assert f'name="shown" value="{est:.2f}"' in c.get("/").text
+    run_once(app, c, shown="0")
+    assert not p.keyframes_path.exists() and "estimate is now" in c.get("/").text
+    run_once(app, c, shown=f"{est:.2f}")
+    assert p.keyframes_path.exists()
+
+
+def test_unknown_estimate_runs_to_the_gate_then_shows_it(tmp_path, song):
+    p = project(tmp_path, song, shots=False)
+    write_json(p.root / "project.json", p.config | {"modes": DEFAULT_MODES | {"shots": "auto", "keyframes": "auto"}})
+    app = create_app(p, FakeGenerator, lambda p: (text_chat, vision_chat()))
+    c = local(app)
+    assert "estimate after shots are written" in c.get("/").text
+    run_once(app, c, shown="")
+    assert p.shots_path.exists() and not p.keyframes_path.exists()
+    page = c.get("/").text
+    assert f"Run (≈${estimate(p):.2f})" in page and estimate(p) > 0

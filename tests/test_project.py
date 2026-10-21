@@ -83,3 +83,20 @@ def test_shot_is_dataclass():
 def test_brief_from_dict_stays_strict_on_string_avoid():
     with pytest.raises(ValueError, match="expected list, got str"):
         brief_from_dict({**BRIEF, "avoid": "blur, text"})
+
+
+def test_shot_from_dict_rejects_nan_and_inf():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            shot_from_dict({**SHOT, "end": bad})
+
+
+def test_missing_project_and_shotless_file_raise_clearly(tmp_path):
+    from celery_man.project import NoProject
+
+    with pytest.raises(NoProject, match=str(tmp_path / "nope")):
+        Project(tmp_path / "nope")
+    p = Project.create(tmp_path / "p", _song(tmp_path), "t")
+    write_json(p.shots_path, {"inputs": "x"})
+    with pytest.raises(ValueError, match="shots"):
+        p.load_shots()

@@ -1,7 +1,10 @@
 """Pipeline: hash-stamped decisions, per-step staleness, and advance in either mode."""
 
+import fcntl
 import logging
 import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +37,33 @@ class WaitingError(RuntimeError):
     def __init__(self, step: str) -> None:
         super().__init__(f"waiting on the {step} decision")
         self.step = step
+
+
+class BusyError(RuntimeError):
+    """Another run (CLI or web) holds the project's run.lock (the CLI exits 2)."""
+
+
+class Declined(RuntimeError):
+    """quick()'s confirm callback refused the cost at the spend gate; nothing was spent (the CLI exits 1)."""
+
+
+@contextmanager
+def run_lock(p: Project) -> Iterator[None]:
+    """Exclusive, non-blocking lock on root/run.lock for a whole advance or quick, across processes."""
+    with (p.root / "run.lock").open("a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BusyError(f"another run is going in {p.root}") from None
+        yield
+
+
+def run_busy(p: Project) -> bool:
+    try:
+        with run_lock(p):
+            return False
+    except BusyError:
+        return True
 
 
 @dataclass
@@ -120,11 +150,15 @@ def _preflight(p: Project, led: Ledger, need: float) -> None:
         raise BudgetError(f"a quick pass over the range needs ${need:.2f}, ${p.cap_usd - led.spent_usd():.2f} left")
 
 
-def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None) -> Path:
+Confirm = Callable[[float], bool]
+
+
+def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: Confirm | None = None) -> Path:
     """Test mode (R3): one unreviewed seed-1 take per shot, cut to out/quick.mp4. Never writes picks.json; keyframe and
-    take modes are ignored, but its stills land in keyframes.json unapproved (note "quick") so a judged run reviews them."""
+    take modes are ignored, but its stills land in keyframes.json unapproved (note "quick") so a judged run reviews them.
+    confirm gets the quick cost once the brief and shots exist, before any spend; False raises Declined."""
     run = steps.Run(p, gen, chat_text)
-    with run.stack:
+    with run_lock(p), run.stack:
         for i, step in enumerate(STEPS[:3]):
             st = status(p)[i]
             if st.state == "waiting":
@@ -134,7 +168,10 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None) -> Path:
                 if (st := status(p)[i]).state != "done":
                     raise WaitingError(step) if st.state == "waiting" else AutoError(f"quick: {step} is still {st.state} after running it")
         brief, shots, kfs = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}
-        _preflight(p, run.led, _quick_price(p, run.led, shots, brief, kfs))
+        price = _quick_price(p, run.led, shots, brief, kfs)
+        if confirm and not confirm(price):
+            raise Declined(f"quick pass (${price:.2f}) declined; nothing spent")
+        _preflight(p, run.led, price)
         regen = [(s, steps.QUICK_SEED) for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
         failed = {s.id for s in steps._stills(run, kfs, regen, brief, approved=None, note="quick")}
         keys = takes.quick_takes(run, [s for s in shots if s.id not in failed], brief, kfs)
@@ -150,10 +187,13 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None) -> Path:
     return dest
 
 
-def advance(p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vision: ChatFn | None = None) -> list[StepState]:
-    """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish."""
+def advance(
+    p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vision: ChatFn | None = None, confirm: Confirm | None = None
+) -> list[StepState]:
+    """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish.
+    confirm gets the estimate once, at the first spending step (the brief and shots exist by then); False stops there."""
     run = steps.Run(p, gen, chat_text, chat_vision)
-    with run.stack:
+    with run_lock(p), run.stack:
         sts, checked = status(p), False
         for _ in range(MAX_PASSES):
             i = next((i for i, s in enumerate(sts) if s.state != "done"), None)
@@ -162,6 +202,9 @@ def advance(p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vi
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
                 checked = True
+                if confirm and not confirm(est := estimate(p)):
+                    log.info("advance: stopped before spending ($%.2f declined)", est)
+                    return sts
                 _preflight(p, run.led, quick_cost(p))
             RUNNERS[sts[i].step](run)
             sts = status(p)

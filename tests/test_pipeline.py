@@ -293,3 +293,36 @@ def test_clean_run_spend_nets_to_actuals(tmp_path, song):
     actual = sum(r["wall_s"] * GPU_PRICE[r["gpu"]] for r in led.rows() if r.get("kind") == "job" and r["model"] != "reserve")
     assert led.spent_usd() == pytest.approx(3 + actual)
     assert led.rounds("s01") == [1]
+
+
+def test_held_run_lock_refuses_advance_and_quick(tmp_path, song):
+    from celery_man.pipeline import BusyError, quick, run_lock
+
+    p = make(tmp_path, song)
+    with run_lock(p):
+        with pytest.raises(BusyError):
+            run_auto(p)
+        with pytest.raises(BusyError):
+            quick(p, CountingGen(), chat_text=text_chat)
+    assert not p.brief_path.exists()
+    assert set(states(run_auto(p)).values()) == {"done"}  # released
+
+
+def test_confirm_sees_the_real_estimate_after_shots(tmp_path, song):
+    p, seen = make(tmp_path, song), []
+    gen = CountingGen()
+    sts = advance(p, gen, text_chat, vision_chat(), confirm=lambda c: seen.append(c) or False)
+    assert len(seen) == 1 and seen[0] > 0 and seen[0] == pytest.approx(estimate(p))
+    assert states(sts)["shots"] == "done" and states(sts)["keyframes"] != "done"
+    assert gen.stills_n == gen.clips_n == [] and not [r for r in Ledger(p.ledger_path).rows() if r.get("kind") == "job"]
+    assert set(states(advance(p, gen, text_chat, vision_chat(), confirm=lambda c: True)).values()) == {"done"}
+
+
+def test_quick_declined_at_the_gate_spends_nothing(tmp_path, song):
+    from celery_man.pipeline import Declined, quick
+
+    p, seen = make(tmp_path, song), []
+    gen = CountingGen()
+    with pytest.raises(Declined):
+        quick(p, gen, chat_text=text_chat, confirm=lambda c: seen.append(c) or False)
+    assert len(seen) == 1 and seen[0] > 0 and p.shots_path.exists() and gen.stills_n == []
