@@ -102,11 +102,20 @@ def write_shots(
     else:
         from celery_man.auto_scene import CONTRACT, catalogue_text  # auto_scene imports this module
 
+        both = "footage" in kinds
         system = (
-            f"You plan the shots of a music video, one per window. Craft rules for footage shots only: {FOOTAGE_RULES} {JSON_ONLY} "
+            f"You plan the shots of a music video, one per window. {JSON_ONLY} "
             f"Reply with a JSON list with one object per id: {{id, kind ({' or '.join(kinds)}), action, ...}}. "
-            "A footage shot adds cast ([names]), place (name or null), framing. An animation shot adds either template (a name below) "
-            "and params (object, omitted params take their defaults; type text goes in params), or code (a whole custom scene). "
+            + (
+                f"Craft rules for footage shots only: {FOOTAGE_RULES} A footage shot adds cast ([names]), place (name or null), framing. "
+                if both
+                else ""
+            )
+            + ("Every shot is an animation shot, drawn by code, not filmed: no cast, place or framing. " if not both else "")
+            + "An animation shot adds either template (a name below) and params (object, omitted params take their defaults; type text "
+            "goes in params), or code (a whole custom scene); action says what the viewer sees. "
+            'Example animation shot: {"id": "s01", "kind": "animation", "action": "what the viewer sees, one sentence", '
+            '"template": "rings", "params": {}}. '
             f"Do not change or add windows.\nTemplates:\n{catalogue_text()}\n{CONTRACT}"
         )
     user = f"Brief: {_brief_text(brief)}\nWindows: {json.dumps(plan)}"
@@ -131,7 +140,7 @@ def write_shots(
         return Shot(i, w[0], w[1], w[2], d["action"], [], None, "", "animation", scene)
 
     def one(i, w, d, codes) -> Shot:
-        kind = d.get("kind", "footage")
+        kind = d.get("kind", "footage") if kinds != ["animation"] else "animation"  # a lone kind needs no label; small models mangle it
         if kind not in kinds:
             raise ValueError(f"{i}: kind {kind!r} is not allowed (allowed: {', '.join(kinds)})")
         if kind == "animation":

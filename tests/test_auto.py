@@ -219,6 +219,14 @@ def test_kind_not_allowed_fed_back():
     assert "s02" in chat.calls[1][1] and "animation" in chat.calls[1][1] and "s01" not in chat.calls[1][1].split("rejected")[-1]
 
 
+def test_lone_kind_label_is_ignored_and_prompt_has_example():
+    bad = [{"id": i, "kind": "action", "action": "dots", "template": "rings", "params": {}} for i in ("s01", "s02")]
+    chat = stub(json.dumps(bad))
+    shots, _ = write_shots(chat, brief(), WINDOWS, ["animation"])
+    assert [s.kind for s in shots] == ["animation"] * 2 and len(chat.calls) == 1
+    assert '"template": "rings"' in chat.calls[0][0]
+
+
 def test_out_of_range_param_is_fed_back():
     chat = stub(mixed_reply({"count": 99999}), mixed_reply())
     shots, _ = write_shots(chat, brief(), WINDOWS3, MIXED)
