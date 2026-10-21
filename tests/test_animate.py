@@ -1,6 +1,9 @@
 import hashlib
+import http.server
 import json
+import os
 import subprocess
+import threading
 import time
 
 import pytest
@@ -158,3 +161,45 @@ def test_bundled_faces_load(tmp_path):
     }
     """
     ChromiumRenderer().render(job(src, n=1), tmp_path / "a.mp4")
+
+
+@pytest.mark.slow
+def test_popup_cannot_reach_network(tmp_path):
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/leak"
+    src = f"""
+    function setup(env) {{
+      window.open('{url}?open');
+      const a = document.createElement('a'); a.href = '{url}?blank'; a.target = '_blank'; document.body.appendChild(a); a.click();
+      return new Promise(r => setTimeout(r, 1500));
+    }}
+    function draw(ctx, f, env) {{}}
+    """
+    try:
+        ChromiumRenderer().render(job(src, n=2), tmp_path / "a.mp4")
+    except SceneError:
+        pass
+    finally:
+        srv.shutdown()
+    assert hits == []
+
+
+def test_interrupted_render_kills_child(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(animate.subprocess.Popen, "communicate", lambda self, timeout: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(animate.os, "killpg", lambda pid, sig: killed.append(pid) or os.kill(pid, sig))
+    with pytest.raises(KeyboardInterrupt):
+        ChromiumRenderer().render(job(n=2), tmp_path / "a.mp4")
+    assert killed

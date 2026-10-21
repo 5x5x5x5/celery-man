@@ -90,9 +90,11 @@ def render_in_browser(job: RenderJob, out: Path, frame_limit_ms: float) -> Path:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": job.width, "height": job.height})
+            # route on the context, not the page, so popups (window.open, target=_blank) are sandboxed too
+            context = browser.new_context(viewport={"width": job.width, "height": job.height}, service_workers="block")
+            context.route("**/*", _serve(job.source))
+            page = context.new_page()
             page.on("pageerror", lambda e: errors.append(str(e)))
-            page.route("**/*", _serve(job.source))
             payload = {k: getattr(job, k) for k in ("params", "look", "width", "height", "fps", "seed")}
             try:
                 page.goto(ORIGIN + "index.html")
@@ -135,11 +137,13 @@ class ChromiumRenderer:
             )  # fmt: skip
             try:
                 _, err = child.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
+            except BaseException as e:  # timeout, Ctrl-C or anything else: the child's own session never sees our SIGINT
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
                 out.with_suffix(".part.mp4").unlink(missing_ok=True)
-                raise SceneError(f"scene did not finish in {timeout:.0f}s (stuck loop?)") from None
+                if isinstance(e, subprocess.TimeoutExpired):
+                    raise SceneError(f"scene did not finish in {timeout:.0f}s (stuck loop?)") from None
+                raise
         if child.returncode != 0:
             raise SceneError("\n".join(err.strip().splitlines()[-20:]) or f"scene render exited {child.returncode}")
         return out
