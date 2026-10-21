@@ -133,8 +133,12 @@ def run_brief(run: Run) -> None:
 
 
 def run_shots(run: Run) -> None:
-    brief = run.p.load_brief()
-    run.p.save_shots(auto.write_shots(run.chat("shots", "text"), brief, windows(run.p)), shots_inputs(run.p, brief))
+    from celery_man import auto_scene  # auto_scene imports renders, which imports this module
+
+    brief, chat = run.p.load_brief(), run.chat("shots", "text")
+    shots, codes = auto.write_shots(chat, brief, windows(run.p), run.p.kinds)
+    shots = [auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s for s in shots]
+    run.p.save_shots(shots, shots_inputs(run.p, brief))
 
 
 def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:

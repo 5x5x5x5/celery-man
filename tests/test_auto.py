@@ -49,18 +49,18 @@ def test_ask_json_gives_up_after_three():
 
 def test_write_shots_rejects_unknown_cast_then_accepts():
     chat = stub(shots_reply("B"), shots_reply("A"))
-    shots = write_shots(chat, brief(), WINDOWS)
+    shots = write_shots(chat, brief(), WINDOWS, ["footage"])[0]
     assert [s.id for s in shots] == ["s01", "s02"]
     assert "unknown cast 'B' (known: A)" in chat.calls[1][1]
 
 
 def test_write_shots_keeps_windows():
-    shots = write_shots(stub(shots_reply(start=99, end=100)), brief(), WINDOWS)
+    shots = write_shots(stub(shots_reply(start=99, end=100)), brief(), WINDOWS, ["footage"])[0]
     assert [(s.start, s.end, s.section) for s in shots] == [(0.0, 4.0, "x"), (4.0, 8.0, "y")]
 
 
 def test_pick_take_must_pick_rejects_null():
-    shot = write_shots(stub(shots_reply()), brief(), WINDOWS)[0]
+    shot = write_shots(stub(shots_reply()), brief(), WINDOWS, ["footage"])[0][0]
     chat = stub('{"pick": null, "why": "none"}', '{"pick": 1, "why": "best"}')
     assert pick_take(chat, shot, brief(), [Path("a.png"), Path("b.png")], must_pick=True) == (1, "best")
     assert len(chat.calls) == 2
@@ -127,13 +127,13 @@ def test_write_shots_reports_all_bad_shots_and_is_lenient():
     ]
     good = [{"id": f"s0{i}", "cast": ["A"], "place": "P"} for i in (1, 2, 3)] + [bad[3]]
     chat = stub(json.dumps({"shots": [r | row for r in bad]}), json.dumps([r | row for r in good]))
-    shots = write_shots(chat, b, ws)
+    shots, _ = write_shots(chat, b, ws, ["footage"])
     assert all(i in chat.calls[1][1] for i in ("s01", "s02", "s03"))
     assert shots[3].cast == ["A"] and shots[3].place is None
 
 
 def test_pick_take_empty_sheets():
-    shot = write_shots(stub(shots_reply()), brief(), WINDOWS)[0]
+    shot = write_shots(stub(shots_reply()), brief(), WINDOWS, ["footage"])[0][0]
     with pytest.raises(ValueError):
         pick_take(stub(), shot, brief(), [], must_pick=False)
 
@@ -171,3 +171,69 @@ def test_rewrite_shot_rejects_empty_action_or_framing():
     chat = stub(empty, json.dumps({"action": "a person stands", "cast": ["A"], "place": "P", "framing": ""}), good)
     assert rewrite_shot(chat, shot, brief(), "morphing").action == "a person stands"
     assert "non-empty" in chat.calls[1][1] and "non-empty" in chat.calls[2][1]
+
+
+TODAY_SHOTS_SYSTEM = (
+    "You plan the shots of a music video, one per window. Craft rules: every shot is one concrete, filmable action under a locked "
+    "or slowly moving camera. No on-screen text, captions, signs or signage. Reply with JSON only, no prose. Reply with a JSON list "
+    "with one object per id: {id, action, cast ([names]), place (name or null), framing}. Do not change or add windows."
+)
+MIXED = ["footage", "animation"]
+WINDOWS3 = [(0.0, 4.0, "x"), (4.0, 8.0, "y"), (8.0, 12.0, "y")]
+
+
+def mixed_reply(rings_params=None):
+    return json.dumps(
+        [
+            {"id": "s01", "kind": "animation", "action": "rings pulse", "template": "rings", "params": rings_params or {"count": 4}},
+            {"id": "s02", "kind": "animation", "action": "a custom scene", "code": "function setup(env) {}\nfunction draw(ctx, f, env) {}"},
+            {"id": "s03", "kind": "footage", "action": "a person walks", "cast": ["A"], "place": "P", "framing": "wide shot"},
+        ]
+    )
+
+
+def test_footage_only_prompt_unchanged():
+    chat = stub(shots_reply())
+    shots, codes = write_shots(chat, brief(), WINDOWS, ["footage"])
+    assert chat.calls[0][0] == TODAY_SHOTS_SYSTEM and codes == {}
+    assert [(s.kind, s.scene, s.action) for s in shots] == [("footage", None, "a person walks")] * 2
+
+
+def test_mixed_kinds_parsed():
+    chat = stub(mixed_reply())
+    shots, codes = write_shots(chat, brief(), WINDOWS3, MIXED)
+    assert [s.kind for s in shots] == ["animation", "animation", "footage"]
+    assert shots[0].scene == {"template": "rings", "params": {"count": 4, "thickness": 0.012}}
+    assert shots[1].scene == {"file": "scenes/s02.js", "params": {}}
+    assert codes == {"s02": "function setup(env) {}\nfunction draw(ctx, f, env) {}"}
+    assert shots[2].cast == ["A"] and shots[2].place == "P"
+    system = chat.calls[0][0]
+    assert "plan the shots" in system and "rings:" in system and "draw(ctx, f, env)" in system and "footage shots only" in system
+
+
+def test_kind_not_allowed_fed_back():
+    bad = json.loads(shots_reply())
+    bad[1] = {"id": "s02", "kind": "animation", "action": "rings", "template": "rings", "params": {}}
+    chat = stub(json.dumps(bad), shots_reply())
+    write_shots(chat, brief(), WINDOWS, ["footage"])
+    assert "s02" in chat.calls[1][1] and "animation" in chat.calls[1][1] and "s01" not in chat.calls[1][1].split("rejected")[-1]
+
+
+def test_out_of_range_param_is_fed_back():
+    chat = stub(mixed_reply({"count": 99999}), mixed_reply())
+    shots, _ = write_shots(chat, brief(), WINDOWS3, MIXED)
+    assert "s01" in chat.calls[1][1] and "count" in chat.calls[1][1].split("rejected")[-1]
+    assert shots[0].scene["params"]["count"] == 4
+
+
+def test_brief_without_look_gets_default():
+    from celery_man.auto import write_brief
+    from celery_man.project import DEFAULT_LOOK
+
+    st = {"medium": "ink", "palette": "grey", "lighting": "soft", "camera": "static"}
+    d = {"logline": "l", "style": st, "cast": [{"name": "A", "description": "d"}], "places": [], "avoid": []}
+    assert write_brief(stub(json.dumps(d)), "").look == DEFAULT_LOOK
+    assert write_brief(stub(json.dumps(d | {"look": "warm"})), "").look == DEFAULT_LOOK
+    chat = stub(json.dumps(d | {"look": DEFAULT_LOOK | {"typeface": "comic"}}), json.dumps(d))
+    write_brief(chat, "")
+    assert "look.typeface" in chat.calls[1][1] and "typeface" in chat.calls[0][0]

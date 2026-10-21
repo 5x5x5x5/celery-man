@@ -9,16 +9,18 @@ from typing import Any
 
 import openai
 
+from celery_man import templates
 from celery_man.compose import PromptTooLong, compose
-from celery_man.project import STYLE_KEYS, Brief, Shot, brief_from_dict
+from celery_man.project import DEFAULT_LOOK, STYLE_KEYS, TYPEFACES, Brief, Shot, brief_from_dict
 
 log = logging.getLogger(__name__)
 ChatFn = Callable[[str, str, list[Path]], str]
 
-CRAFT = (
-    "Craft rules: every shot is one concrete, filmable action under a locked or slowly moving camera. "
-    "No on-screen text, captions, signs or signage. Reply with JSON only, no prose."
+FOOTAGE_RULES = (
+    "every shot is one concrete, filmable action under a locked or slowly moving camera. No on-screen text, captions, signs or signage."
 )
+JSON_ONLY = "Reply with JSON only, no prose."
+CRAFT = f"Craft rules: {FOOTAGE_RULES} {JSON_ONLY}"
 
 
 class AutoError(RuntimeError):
@@ -68,6 +70,8 @@ def _lenient_brief(d: Any) -> Any:
     for k in ("cast", "places"):
         if isinstance(d.get(k), dict):
             d[k] = [d[k]]
+    if not isinstance(d.get("look"), dict):
+        d["look"] = dict(DEFAULT_LOOK)
     if isinstance(d.get("style"), dict):
         d["style"] = {k: ", ".join(map(str, v)) if isinstance(v, list) else v for k, v in d["style"].items()}
     return d
@@ -77,23 +81,61 @@ def write_brief(chat_fn: ChatFn, seed: str) -> Brief:
     system = (
         "You write a creative brief for a short music video. " + CRAFT + " Keys: logline (str), style (object with "
         f"{', '.join(STYLE_KEYS)}, all strings), cast ([{{name, description}}], short names), places ([{{name, description}}]), "
-        "avoid ([str]). Descriptions are visual and self-contained."
+        f"avoid ([str]), look ({{background: #rrggbb, colors: [1 to 5 #rrggbb], typeface: one of {'|'.join(TYPEFACES)}}}). "
+        "Descriptions are visual and self-contained."
     )
     user = f"Seed: {seed}" if seed.strip() else "No seed given: invent the theme freely."
     return ask_json(chat_fn, system, user, [], lambda d: brief_from_dict(_lenient_brief(d)))
 
 
-def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]]) -> list[Shot]:
+def write_shots(
+    chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]], kinds: list[str]
+) -> tuple[list[Shot], dict[str, str]]:
+    """The shots, and {shot id: code} for custom animation scenes (their scene file is not written here)."""
     ids = [f"s{i:02d}" for i in range(1, len(windows) + 1)]
     plan = [{"id": i, "start": w[0], "end": w[1], "section": w[2]} for i, w in zip(ids, windows)]
-    system = (
-        "You plan the shots of a music video, one per window. " + CRAFT + " Reply with a JSON list with one object per id: "
-        "{id, action, cast ([names]), place (name or null), framing}. Do not change or add windows."
-    )
+    if kinds == ["footage"]:
+        system = (
+            "You plan the shots of a music video, one per window. " + CRAFT + " Reply with a JSON list with one object per id: "
+            "{id, action, cast ([names]), place (name or null), framing}. Do not change or add windows."
+        )
+    else:
+        from celery_man.auto_scene import CONTRACT, catalogue_text  # auto_scene imports this module
+
+        system = (
+            f"You plan the shots of a music video, one per window. Craft rules for footage shots only: {FOOTAGE_RULES} {JSON_ONLY} "
+            f"Reply with a JSON list with one object per id: {{id, kind ({' or '.join(kinds)}), action, ...}}. "
+            "A footage shot adds cast ([names]), place (name or null), framing. An animation shot adds either template (a name below) "
+            "and params (object, omitted params take their defaults; type text goes in params), or code (a whole custom scene). "
+            f"Do not change or add windows.\nTemplates:\n{catalogue_text()}\n{CONTRACT}"
+        )
     user = f"Brief: {_brief_text(brief)}\nWindows: {json.dumps(plan)}"
     cast, places = {c.name for c in brief.cast}, {p.name for p in brief.places}
 
-    def one(i, w, d) -> Shot:
+    def animation(i, w, d, codes) -> Shot:
+        if not isinstance(d.get("action"), str) or not d["action"]:
+            raise ValueError(f"{i}: action must be a non-empty string")
+        if "code" in d:
+            if not isinstance(d["code"], str) or not d["code"].strip():
+                raise ValueError(f"{i}: code must be a non-empty string")
+            codes[i] = d["code"]
+            scene = {"file": f"scenes/{i}.js", "params": {}}
+        else:
+            params = d.get("params") or {}
+            if not isinstance(d.get("template"), str) or not isinstance(params, dict):
+                raise ValueError(f"{i}: an animation shot needs template (a name) and params (an object), or code")
+            try:
+                scene = {"template": d["template"], "params": templates.validate_params(d["template"], params)}
+            except ValueError as e:
+                raise ValueError(f"{i}: {e}") from e
+        return Shot(i, w[0], w[1], w[2], d["action"], [], None, "", "animation", scene)
+
+    def one(i, w, d, codes) -> Shot:
+        kind = d.get("kind", "footage")
+        if kind not in kinds:
+            raise ValueError(f"{i}: kind {kind!r} is not allowed (allowed: {', '.join(kinds)})")
+        if kind == "animation":
+            return animation(i, w, d, codes)
         c, p = d.get("cast"), d.get("place")
         if isinstance(c, str):
             c = [c]
@@ -106,7 +148,7 @@ def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float,
                 raise ValueError(f"{i}: unknown cast '{x}' (known: {', '.join(sorted(cast))})")
         if p is not None and (not isinstance(p, str) or p not in places):
             raise ValueError(f"{i}: place must be a name or null (known: {', '.join(sorted(places))})")
-        if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
+        if not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
             raise ValueError(f"{i}: action and framing must be non-empty strings")
         shot = Shot(i, w[0], w[1], w[2], d["action"], c, p, d["framing"])
         try:
@@ -115,7 +157,7 @@ def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float,
             raise ValueError(f"{i}: {e}") from e
         return shot
 
-    def validate(data) -> list[Shot]:
+    def validate(data) -> tuple[list[Shot], dict[str, str]]:
         if isinstance(data, dict) and isinstance(data.get("shots"), list):
             data = data["shots"]
         if not isinstance(data, list):
@@ -123,15 +165,15 @@ def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float,
         by_id = {d.get("id"): d for d in data if isinstance(d, dict)}
         if len(data) != len(ids) or set(by_id) != set(ids):
             raise ValueError(f"expected exactly one entry for each of {', '.join(ids)}")
-        shots, errs = [], []
+        shots, codes, errs = [], {}, []
         for i, w in zip(ids, windows):
             try:
-                shots.append(one(i, w, by_id[i]))
+                shots.append(one(i, w, by_id[i], codes))
             except ValueError as e:
                 errs.append(str(e))
         if errs:
             raise ValueError("; ".join(errs))
-        return shots
+        return shots, codes
 
     return ask_json(chat_fn, system, user, [], validate)
 
