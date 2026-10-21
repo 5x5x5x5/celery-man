@@ -16,7 +16,7 @@ def _data_url(p: Path) -> str:
 
 
 def chat(cfg: ModelCfg, system: str, user: str, images: list[Path] | None = None) -> str:
-    client = openai.OpenAI(base_url=cfg.base_url, api_key=os.environ.get(cfg.api_key_env) or "none", timeout=300)
+    client = openai.OpenAI(base_url=cfg.base_url, api_key=os.environ.get(cfg.api_key_env) or "none", timeout=300, max_retries=0)
     content = [{"type": "text", "text": user}] + [{"type": "image_url", "image_url": {"url": _data_url(p)}} for p in images or []]
     r = client.chat.completions.create(
         model=cfg.model,
