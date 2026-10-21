@@ -406,3 +406,14 @@ def test_old_project_pages_unchanged(tmp_path, song):
     assert 'name="kind_' not in page and 'name="scene_' not in page and 'name="framing_s01"' in page
     assert client(p).post("/shots", data={"action_s01": "x", "cast_s01": ["A"], "place_s01": "P", "framing_s01": "w"}).status_code == 200
     assert p.load_shots()[0].kind == "footage" and p.load_shots()[0].scene is None
+
+
+def test_params_kept_for_displayed_default_template(tmp_path, song):
+    p = project(tmp_path, song, shots=False)
+    write_json(p.root / "project.json", p.config | {"kinds": ["animation"]})
+    c = client(p)
+    page = c.get("/shots").text
+    assert 'name="shown_s01" value="rings"' in page
+    form = {"action_s01": "a", "scene_s01": "rings", "shown_s01": "rings", "param_s01_count": "5"}
+    assert c.post("/shots", data=form).status_code == 200
+    assert p.load_shots()[0].scene["params"]["count"] == 5

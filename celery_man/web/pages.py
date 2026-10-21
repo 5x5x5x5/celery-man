@@ -172,7 +172,7 @@ def _scene(form, sid: str, old: Shot | None) -> tuple[dict, str | None]:
             )
         return {"file": f"scenes/{sid}.js", "params": prev["params"] if "file" in prev else {}} | note, code
     params = {}
-    if prev.get("template") == choice:
+    if form.get(f"shown_{sid}", prev.get("template")) == choice:  # the inputs on screen were this template's
         for k, spec in scene_templates.catalogue().get(choice, {}).get("params", {}).items():
             if spec["type"] == "bool":
                 params[k] = f"param_{sid}_{k}" in form

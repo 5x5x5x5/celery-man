@@ -19,6 +19,7 @@
     <td data-label="Action"><textarea name="action_{{ s.id }}" rows="2" aria-label="{{ s.id }} action">{{ s.action }}</textarea></td>
     {% if s.kind == "animation" %}
     <td data-label="Scene" colspan="3" class="scene">
+      <input type="hidden" name="shown_{{ s.id }}" value="{{ r.tpl }}">
       <select name="scene_{{ s.id }}" aria-label="{{ s.id }} scene">
         {% for n in templates %}<option{% if n == r.tpl %} selected{% endif %}>{{ n }}</option>{% endfor %}
         <option{% if r.tpl == "custom" %} selected{% endif %}>custom</option>
