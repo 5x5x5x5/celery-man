@@ -119,7 +119,7 @@ def test_pick_writes_picks_json(tmp_path, song):
     assert c.post("/takes/s01/pick", data={"key": "nope"}).status_code == 400
     assert c.post("/takes/s01/pick", data={"key": key}).status_code == 200
     assert read_json(p.picks_path)["s01"] == {"key": key, "clip": f"takes/{key}.mp4", "in": 0.5, "round": 1, "gen": 1, "quick": False}
-    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 6
+    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 7
 
 
 def test_reject_disabled_in_round_two(tmp_path, song):
@@ -312,5 +312,5 @@ def test_round_two_without_usable_takes_can_be_rejected_then_falls_back(tmp_path
     assert "disabled" not in c.get("/takes").text
     assert c.post("/takes/s01/reject", data={"reason": "no usable take"}).status_code == 200
     assert "quick take" in c.get("/takes").text
-    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 6
+    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 7
     assert read_json(p.picks_path)["s01"]["quick"]

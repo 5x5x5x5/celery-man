@@ -144,7 +144,7 @@ async def shots_post(request: Request):
 @router.get("/keyframes")
 def keyframes_get(request: Request):
     p = _p(request)
-    brief, shots, kfs = p.load_brief(), p.load_shots() or [], read_json(p.keyframes_path) or {}
+    brief, shots, kfs = p.load_brief(), p.load_footage() or [], read_json(p.keyframes_path) or {}
     rows = [{"s": s, "kf": kfs.get(s.id), "need": kf_need(p, s, brief, kfs.get(s.id))} for s in shots] if brief else []
     return render(request, "keyframes.html", rows=rows, auto=p.modes["keyframes"] == "auto")
 
@@ -175,7 +175,7 @@ def _choices(led: Ledger, sid: str, plan: TakePlan) -> tuple[int, list[str]]:
 
 
 def _plan(p: Project, led: Ledger, sid: str) -> TakePlan:
-    brief, shots = p.load_brief(), {s.id: s for s in p.load_shots() or []}
+    brief, shots = p.load_brief(), {s.id: s for s in p.load_footage() or []}
     if brief is None or sid not in shots:
         raise HTTPException(404)
     return take_plan(p, led, shots[sid], brief, (read_json(p.keyframes_path) or {}).get(sid), (read_json(p.picks_path) or {}).get(sid))
@@ -185,7 +185,7 @@ def _plan(p: Project, led: Ledger, sid: str) -> TakePlan:
 def takes_get(request: Request):
     p = _p(request)
     led, rows = Ledger(p.ledger_path, p.cap_usd), []
-    picks, shots = read_json(p.picks_path) or {}, (p.load_shots() or []) if p.load_brief() else []
+    picks, shots = read_json(p.picks_path) or {}, (p.load_footage() or []) if p.load_brief() else []
     for s in shots:
         plan = _plan(p, led, s.id)
         rnd, keys = _choices(led, s.id, plan)

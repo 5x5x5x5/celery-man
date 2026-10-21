@@ -169,7 +169,7 @@ def quick_takes(run: Run, shots: list[Shot], brief: Brief, kfs: dict) -> dict[st
 
 def _plans(run: Run) -> tuple[Brief, list[Shot], dict, dict[str, TakePlan]]:
     p = run.p
-    brief, shots, kfs, picks = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}
+    brief, shots, kfs, picks = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}
     return brief, shots, picks, {s.id: take_plan(p, run.led, s, brief, kfs.get(s.id), picks.get(s.id)) for s in shots}
 
 
@@ -180,7 +180,7 @@ def _rewrite_rejected(run: Run) -> bool:
     if not edits:
         return False
     out = []
-    for s in shots:
+    for s in run.p.load_shots():  # all shots: animation ones are saved back untouched
         if s.id in edits:
             new = auto.rewrite_shot(run.chat("takes", "text"), s, brief, picks.get(s.id, {}).get("reason", ""))
             if new == s:

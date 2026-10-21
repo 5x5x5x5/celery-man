@@ -32,8 +32,9 @@ def assemble(cuts: list[dict], song: Path, out: Path, fps: int = 24, w: int = 96
         if abs(a["end"] - b["start"]) > 1e-6:
             raise ValueError(f"cuts must be contiguous and in order: cut {i} ends {a['end']} but cut {i + 1} starts {b['start']}")
     for i, c in enumerate(cuts):
-        have, need = probe_duration(c["clip"]), c["in"] + (c["end"] - c["start"])
-        if have < need:
+        # what the trim below takes: whole frames, so a clip of exactly the window's frame count fits
+        have, need = probe_duration(c["clip"]), c["in"] + (round(c["end"] * fps) - round(c["start"] * fps)) / fps
+        if have < need - 1e-3:
             raise ClipTooShort(f"cut {i}: clip is {have:.2f}s, needs {need:.2f}s (in {c['in']} + window {c['end'] - c['start']:.2f})")
     vf = f"fps={fps},scale={w}:{h},setsar=1"
     out.parent.mkdir(parents=True, exist_ok=True)

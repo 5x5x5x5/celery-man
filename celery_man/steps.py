@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from celery_man import auto, features
+from celery_man.animate import SCENES, ChromiumRenderer, Renderer
 from celery_man.assemble import assemble
 from celery_man.compose import compose, prompt_sha
 from celery_man.generate import Generator, StillJob
@@ -73,6 +74,7 @@ class Run:
     gen: Generator
     chat_text: auto.ChatFn | None = None
     chat_vision: auto.ChatFn | None = None
+    renderer: Renderer | None = None
     stack: ExitStack = field(default_factory=ExitStack)
     _open: bool = False
 
@@ -85,6 +87,11 @@ class Run:
             self.stack.enter_context(self.gen.session())
             self._open = True
         return self.gen
+
+    def renders(self) -> Renderer:
+        if self.renderer is None:
+            self.renderer = ChromiumRenderer()
+        return self.renderer
 
     def chat(self, step: str, kind: str) -> auto.ChatFn:
         fn = self.chat_text if kind == "text" else self.chat_vision
@@ -165,7 +172,7 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
 
 def run_keyframes(run: Run) -> None:
     p = run.p
-    brief, shots, kfs = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}
+    brief, shots, kfs = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}
     auto_mode = p.modes["keyframes"] == "auto"
     vision = run.chat("keyframes", "vision") if auto_mode else None
     regen = [(s, kfs[s.id]["seed"] + 1 if s.id in kfs else 1) for s in shots if kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
@@ -188,8 +195,9 @@ def run_keyframes(run: Run) -> None:
 
 def run_assemble(run: Run) -> None:
     p = run.p
-    shots, picks = p.load_shots(), read_json(p.picks_path)
-    cuts = [{"clip": str(p.root / picks[s.id]["clip"]), "in": picks[s.id]["in"], "start": s.start, "end": s.end} for s in shots]
+    shots, picks, ren = p.load_shots(), read_json(p.picks_path) or {}, read_json(p.renders_path) or {}
+    src = {s.id: (ren[s.id]["clip"], 0) if s.kind == "animation" else (picks[s.id]["clip"], picks[s.id]["in"]) for s in shots}
+    cuts = [{"clip": str(p.root / src[s.id][0]), "in": src[s.id][1], "start": s.start, "end": s.end} for s in shots]
     p.out_dir.mkdir(exist_ok=True)
     tmp = p.out_dir / "video.tmp.mp4"
     assemble(cuts, p.song, tmp)
@@ -202,7 +210,13 @@ def write_report(p: Project, led: Ledger) -> None:
     shots, picks, kfs, m = p.load_shots(), read_json(p.picks_path) or {}, read_json(p.keyframes_path) or {}, p.modes
     jobs = [r for r in led.rows() if r.get("kind") == "job"]
     lines = ["# Report", "", f"Decided by: brief {m['brief']}, shots {m['shots']}, keyframes {m['keyframes']}, takes {m['takes']}.", ""]
+    ren = read_json(p.renders_path) or {}
     for s in shots:
+        if s.kind == "animation":
+            sc, key = s.scene, ren.get(s.id, {}).get("key", "-")
+            what = f"template `{sc['template']}`" if "template" in sc else f"file `{sc['file']}`"
+            lines.append(f"- **{s.id}** (animation): {what}; render `{key}`" + (f"; note: {sc['note']}" if sc.get("note") else ""))
+            continue
         pk, fails = picks.get(s.id, {}), sum(1 for r in jobs if r["shot"] == s.id and r.get("failed"))
         takes = [r for r in jobs if r["shot"] == s.id and r.get("model") == TAKE_MODEL]
         g = max((r["gen"] for r in takes), default=0)
@@ -210,9 +224,11 @@ def write_report(p: Project, led: Ledger) -> None:
         how = " (quick)" if pk.get("quick") else f" (round {MAX_ROUND}, forced)" if pk.get("round") == MAX_ROUND else ""
         pick = f"`{pk['key']}`{how}" if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
-        lines.append(f"- **{s.id}**: gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
+        lines.append(f"- **{s.id}** (footage): gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
     if fell_back := [s.id for s in shots if picks.get(s.id, {}).get("quick")]:
         lines += ["", "## Quick fallback (cap reached)", "", "One unreviewed quick take each: " + ", ".join(fell_back)]
+    if fell_back := [s.id for s in shots if s.scene and s.scene.get("note", "").startswith("fallback:")]:
+        lines += ["", "## Scene fallbacks", "", "Custom scene failed, template used instead: " + ", ".join(fell_back)]
     lines += ["", f"Spend: ${led.spent_usd():.2f} of ${p.cap_usd:.2f} cap (ledger estimate; the Modal dashboard is the true spend).", ""]
     (p.out_dir / "report.md").write_text("\n".join(lines))
 
@@ -220,10 +236,14 @@ def write_report(p: Project, led: Ledger) -> None:
 def write_provenance(p: Project) -> None:
     from celery_man.gen_modal import DIFFUSERS_SHA, FLUX, LTX
 
+    fonts = "".join(
+        f"- Font `{f.stem.removeprefix('OFL-')}`: {f.read_text().splitlines()[0]}, SIL Open Font License 1.1.\n"
+        for f in sorted((SCENES / "fonts").glob("OFL-*.txt"))
+    )
     (p.root / "PROVENANCE.md").write_text(
         "# Provenance\n\n"
         f"- Clips: `{LTX}`, LTX-2.x Community License.\n"
         f"- Keyframes: `{FLUX}`, Apache-2.0.\n"
         f"- Song: {p.config['song_source']}\n"
-        f"- diffusers commit: `{DIFFUSERS_SHA}`\n"
+        f"- diffusers commit: `{DIFFUSERS_SHA}`\n" + fonts
     )

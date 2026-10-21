@@ -8,7 +8,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from celery_man import steps, takes
+from celery_man import renders, steps, takes
+from celery_man.animate import Renderer
 from celery_man.assemble import assemble
 from celery_man.auto import AutoError, ChatFn
 from celery_man.generate import Generator
@@ -18,11 +19,12 @@ from celery_man.steps import BudgetError
 
 log = logging.getLogger(__name__)
 
-STEPS = ("timing", "brief", "shots", "keyframes", "takes", "assemble")
+STEPS = ("timing", "brief", "shots", "render", "keyframes", "takes", "assemble")
 RUNNERS = {
     "timing": steps.run_timing,
     "brief": steps.run_brief,
     "shots": steps.run_shots,
+    "render": renders.run_render,
     "keyframes": steps.run_keyframes,
     "takes": takes.run_takes,
     "assemble": steps.run_assemble,
@@ -91,6 +93,18 @@ def _per_shot(p: Project, step: str, needs: dict[str, str], wait_on: set[str], h
     return StepState(step, "stale" if have_file else "missing", detail)
 
 
+def _render(p: Project, brief: Brief, shots: list[Shot]) -> StepState:
+    """Mechanical, so mode-blind: a deterministic failure waits for a person (or the auto shots step) to change the scene."""
+    ren = read_json(p.renders_path) or {}
+    needs = {s.id: renders.render_need(p, s, brief.look, ren.get(s.id)) for s in shots if s.kind == "animation"}
+    open_ = {sid: n for sid, n in needs.items() if n != "done"}
+    if not open_:
+        return StepState("render", "done")
+    if set(open_.values()) == {"failed"}:
+        return StepState("render", "waiting", "; ".join(f"{sid}: {(ren[sid]['error'].splitlines() or [''])[0]}" for sid in open_))
+    return StepState("render", "stale" if ren else "missing", ", ".join(f"{sid} {n}" for sid, n in open_.items()))
+
+
 def _window_mismatch(p: Project, shots: list[Shot]) -> str:
     """The first way a (hand-edited) shots.json departs from the planned ids and windows, or ""."""
     want = [(f"s{i:02d}", a, b) for i, (a, b, _) in enumerate(steps.windows(p), 1)]
@@ -123,14 +137,17 @@ def status(p: Project) -> list[StepState]:
     out[-1].detail = mismatch or out[-1].detail
     if brief is None or not shots:
         return out + [StepState(s, "missing") for s in STEPS[3:]]
+    out.append(_render(p, brief, shots))
+    footage = [s for s in shots if s.kind == "footage"]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
-    out.append(_per_shot(p, "keyframes", {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in shots}, {"judge"}, bool(kfs)))
-    needs = {s.id: takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need for s in shots}
+    out.append(_per_shot(p, "keyframes", {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in footage}, {"judge"}, bool(kfs)))
+    needs = {s.id: takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need for s in footage}
     out.append(_per_shot(p, "takes", needs, {"judge", "edit"}, p.picks_path.exists()))
     video = p.out_dir / "video.mp4"
+    inputs = [f.stat().st_mtime for f in (p.picks_path, p.renders_path) if f.exists()]
     if not video.exists():
         out.append(StepState("assemble", "missing"))
-    elif out[-1].state != "done" or video.stat().st_mtime < p.picks_path.stat().st_mtime:
+    elif out[3].state != "done" or out[-1].state != "done" or video.stat().st_mtime < max(inputs, default=0):
         out.append(StepState("assemble", "stale"))
     else:
         out.append(StepState("assemble", "done"))
@@ -139,7 +156,7 @@ def status(p: Project) -> list[StepState]:
 
 def estimate(p: Project) -> float:
     """USD for the keyframes and takes advance would generate now (shots awaiting a rewrite are not counted)."""
-    brief, shots = p.load_brief(), p.load_shots()
+    brief, shots = p.load_brief(), p.load_footage()
     if brief is None or not shots:
         return 0.0
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
@@ -157,7 +174,7 @@ def _quick_price(p: Project, led: Ledger, shots: list[Shot], brief: Brief, kfs: 
 
 def quick_cost(p: Project) -> float:
     """USD for a quick pass over the shots that have no valid pick: the floor every advance must be able to pay."""
-    brief, shots = p.load_brief(), p.load_shots()
+    brief, shots = p.load_brief(), p.load_footage()
     if brief is None or not shots:
         return 0.0
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
@@ -174,11 +191,13 @@ def _preflight(p: Project, led: Ledger, need: float) -> None:
 Confirm = Callable[[float], bool]
 
 
-def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: Confirm | None = None) -> Path:
+def quick(
+    p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: Confirm | None = None, renderer: Renderer | None = None
+) -> Path:
     """Test mode (R3): one unreviewed seed-1 take per shot, cut to out/quick.mp4. Never writes picks.json; keyframe and
     take modes are ignored, but its stills land in keyframes.json unapproved (note "quick") so a judged run reviews them.
     confirm gets the quick cost once the brief and shots exist, before any spend; False raises Declined."""
-    run = steps.Run(p, gen, chat_text)
+    run = steps.Run(p, gen, chat_text, renderer=renderer)
     with run_lock(p), run.stack:
         for i, step in enumerate(STEPS[:3]):
             st = status(p)[i]
@@ -188,7 +207,10 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: 
                 RUNNERS[step](run)
                 if (st := status(p)[i]).state != "done":
                     raise WaitingError(step) if st.state == "waiting" else AutoError(f"quick: {step} is still {st.state} after running it")
-        brief, shots, kfs = p.load_brief(), p.load_shots(), read_json(p.keyframes_path) or {}
+        renders.run_render(run)
+        if (st := status(p)[3]).state != "done":
+            raise AutoError(f"quick: render is {st.state}: {st.detail}")
+        brief, shots, kfs = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}
         price = _quick_price(p, run.led, shots, brief, kfs)
         if confirm and not confirm(price):
             raise Declined(f"quick pass (${price:.2f}) declined; nothing spent")
@@ -198,8 +220,11 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: 
         keys = takes.quick_takes(run, [s for s in shots if s.id not in failed], brief, kfs)
     if missing := [s.id for s in shots if s.id not in keys]:
         raise RuntimeError(f"quick: no take for {', '.join(missing)}; rerun to retry them")
+    ren = read_json(p.renders_path) or {}
     timeline = [{"shot": s.id, "key": keys[s.id], "clip": f"{p.takes_dir.name}/{keys[s.id]}.mp4", "in": steps.IN_POINT,
-                 "start": s.start, "end": s.end} for s in shots]  # fmt: skip
+                 "start": s.start, "end": s.end} if s.kind == "footage" else
+                {"shot": s.id, "key": ren[s.id]["key"], "clip": ren[s.id]["clip"], "in": 0, "start": s.start, "end": s.end}
+                for s in p.load_shots()]  # fmt: skip
     p.out_dir.mkdir(exist_ok=True)
     write_json(p.out_dir / "quick_timeline.json", timeline)
     tmp, dest = p.out_dir / "quick.tmp.mp4", p.out_dir / "quick.mp4"
@@ -209,11 +234,16 @@ def quick(p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: 
 
 
 def advance(
-    p: Project, gen: Generator, chat_text: ChatFn | None = None, chat_vision: ChatFn | None = None, confirm: Confirm | None = None
+    p: Project,
+    gen: Generator,
+    chat_text: ChatFn | None = None,
+    chat_vision: ChatFn | None = None,
+    confirm: Confirm | None = None,
+    renderer: Renderer | None = None,
 ) -> list[StepState]:
     """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish.
     confirm gets the estimate once, at the first spending step (the brief and shots exist by then); False stops there."""
-    run = steps.Run(p, gen, chat_text, chat_vision)
+    run = steps.Run(p, gen, chat_text, chat_vision, renderer)
     with run_lock(p), run.stack:
         sts, checked = status(p), False
         for _ in range(MAX_PASSES):
