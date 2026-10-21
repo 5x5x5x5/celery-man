@@ -6,12 +6,13 @@ import logging
 from pathlib import Path
 
 from celery_man import llm
+from celery_man.animate import ChromiumRenderer, Renderer
 from celery_man.auto import AutoError, ChatFn
 from celery_man.compose import PromptTooLong
 from celery_man.generate import Generator, ModalGenerator
 from celery_man.ledger import Ledger
 from celery_man.pipeline import BusyError, Declined, WaitingError, advance, estimate, quick, status
-from celery_man.project import NoProject, Project, write_json
+from celery_man.project import KINDS, NoProject, Project, write_json
 from celery_man.steps import BudgetError
 from celery_man.timing import TimingError
 
@@ -24,6 +25,10 @@ REFUSED = (BudgetError, TimingError, PromptTooLong, AutoError, WaitingError, Bus
 
 def make_generator() -> Generator:
     return ModalGenerator()
+
+
+def make_renderer() -> Renderer:
+    return ChromiumRenderer()
 
 
 def make_chats(p: Project) -> tuple[ChatFn, ChatFn]:
@@ -55,7 +60,11 @@ def _new(a) -> int:
     if (a.dir / "project.json").exists():
         log.error("%s already holds a project", a.dir)
         return 2
-    Project.create(a.dir, a.song, a.source)
+    kinds = tuple(a.kinds.split(","))
+    if not kinds or any(k not in KINDS for k in kinds):
+        log.error("bad --kinds %r: kinds are %s", a.kinds, ", ".join(KINDS))
+        return 2
+    Project.create(a.dir, a.song, a.source, kinds)
     log.info("created %s", a.dir)
     return 0
 
@@ -75,7 +84,7 @@ def _modes(a) -> int:
 
 def _run(a) -> int:
     p = Project(a.dir)
-    sts = advance(p, make_generator(), *make_chats(p), confirm=lambda c: _confirm(c, a.yes))
+    sts = advance(p, make_generator(), *make_chats(p), confirm=lambda c: _confirm(c, a.yes), renderer=make_renderer())
     for s in sts:
         log.info("%-10s %-8s %s", s.step, s.state, s.detail)
     return 0 if all(s.state in ("done", "waiting") for s in sts) else 1
@@ -84,7 +93,7 @@ def _run(a) -> int:
 def _quick(a) -> int:
     p = Project(a.dir)
     try:
-        log.info("%s", quick(p, make_generator(), make_chats(p)[0], confirm=lambda c: _confirm(c, a.yes)))
+        log.info("%s", quick(p, make_generator(), make_chats(p)[0], confirm=lambda c: _confirm(c, a.yes), renderer=make_renderer()))
     except Declined:
         return 1
     return 0
@@ -111,7 +120,13 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument(*flags, **kw)
         sp.set_defaults(fn=fn)
 
-    cmd("new", _new, (("--song",), {"type": Path, "required": True}), (("--source",), {"default": ""}))
+    cmd(
+        "new",
+        _new,
+        (("--song",), {"type": Path, "required": True}),
+        (("--source",), {"default": ""}),
+        (("--kinds",), {"default": "footage"}),
+    )
     cmd("status", lambda a: _status_lines(Project(a.dir)) or 0)
     cmd("modes", _modes, (("pairs",), {"nargs": "+", "metavar": "STEP=MODE"}))
     cmd("run", _run, (("--yes",), {"action": "store_true"}))

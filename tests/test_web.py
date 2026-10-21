@@ -119,7 +119,7 @@ def test_pick_writes_picks_json(tmp_path, song):
     assert c.post("/takes/s01/pick", data={"key": "nope"}).status_code == 400
     assert c.post("/takes/s01/pick", data={"key": key}).status_code == 200
     assert read_json(p.picks_path)["s01"] == {"key": key, "clip": f"takes/{key}.mp4", "in": 0.5, "round": 1, "gen": 1, "quick": False}
-    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 6
+    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 7
 
 
 def test_reject_disabled_in_round_two(tmp_path, song):
@@ -312,5 +312,122 @@ def test_round_two_without_usable_takes_can_be_rejected_then_falls_back(tmp_path
     assert "disabled" not in c.get("/takes").text
     assert c.post("/takes/s01/reject", data={"reason": "no usable take"}).status_code == 200
     assert "quick take" in c.get("/takes").text
-    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 6
+    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 7
     assert read_json(p.picks_path)["s01"]["quick"]
+
+
+# --- animation: look, kinds, scenes ----------------------------------------------------------------
+
+
+def both(tmp_path, song):
+    p = project(tmp_path, song)
+    write_json(p.root / "project.json", p.config | {"kinds": ["footage", "animation"]})
+    return p
+
+
+BRIEF_FORM = {"logline": "x", "medium": "m", "palette": "p", "lighting": "l", "camera": "c", "cast_name": ["A"], "cast_description": ["d"],
+              "place_name": ["P"], "place_description": ["d"], "avoid": ""}  # fmt: skip
+
+
+def test_brief_look_saves_and_validates(tmp_path, song):
+    p = project(tmp_path, song, brief=False, shots=False)
+    c = client(p)
+    look = {"background": "#101010", "color_1": "#ff0000", "color_2": "#00ff00", "unused_2": "on", "color_3": "#0000ff", "typeface": "mono"}
+    assert c.post("/brief", data=BRIEF_FORM | look).status_code == 200
+    assert p.load_brief().look == {"background": "#101010", "colors": ["#ff0000", "#0000ff"], "typeface": "mono"}
+    page = c.get("/brief").text
+    assert 'value="#101010"' in page and "<option selected>mono</option>" in page
+    r = c.post("/brief", data=BRIEF_FORM | look | {"background": "red"})
+    assert r.status_code == 422 and "look.background" in r.text
+    assert p.load_brief().look["background"] == "#101010"
+
+
+def test_shots_kind_select_only_when_both_allowed(tmp_path, song):
+    p = both(tmp_path, song)
+    assert 'name="kind_s01"' in client(p).get("/shots").text
+    write_json(p.root / "project.json", p.config | {"kinds": ["footage"]})
+    assert 'name="kind_s01"' not in client(p).get("/shots").text
+
+
+def shot_form(**kw):
+    return {"action_s01": "a", "kind_s01": "animation", "scene_s01": "grid"} | kw
+
+
+def test_switch_to_animation_then_set_params(tmp_path, song):
+    p = both(tmp_path, song)
+    c = client(p)
+    assert c.post("/shots", data=shot_form()).status_code == 200
+    s = p.load_shots()[0]
+    assert s.kind == "animation" and s.scene == {"template": "grid", "params": {"cols": 8, "pulse": 0.6}}
+    page = c.get("/shots").text
+    assert 'name="param_s01_cols"' in page and 'value="8"' in page
+    c.post("/shots", data=shot_form(param_s01_cols="9", param_s01_pulse="0.6"))
+    assert p.load_shots()[0].scene["params"]["cols"] == 9
+    before = p.shots_path.read_text()
+    r = c.post("/shots", data=shot_form(param_s01_cols="999", param_s01_pulse="0.6"))
+    assert r.status_code == 422 and "cols" in r.text and p.shots_path.read_text() == before
+    # switching template resets params to the new template's defaults
+    c.post("/shots", data=shot_form(scene_s01="rings", param_s01_cols="9"))
+    assert p.load_shots()[0].scene["template"] == "rings" and "cols" not in p.load_shots()[0].scene["params"]
+
+
+def test_custom_code_saved_to_scenes(tmp_path, song):
+    p = both(tmp_path, song)
+    client(p).post("/shots", data=shot_form(scene_s01="custom", code_s01="function draw(){}"))
+    assert p.load_shots()[0].scene == {"file": "scenes/s01.js", "params": {}}
+    assert (p.scenes_dir / "s01.js").read_text() == "function draw(){}"
+    assert client(p).get("/shots").text.count("function draw(){}") == 1
+
+
+def test_render_error_and_poster_shown(tmp_path, song):
+    p = both(tmp_path, song)
+    shots = [Shot("s01", 0.0, 2.0, "1", "a", [], None, "", "animation", {"template": "grid", "params": {"cols": 8, "pulse": 0.6}})]
+    p.save_shots(shots, "x")
+    (p.renders_dir).mkdir()
+    (p.renders_dir / "s01.jpg").write_bytes(b"jpg")
+    write_json(p.renders_path, {"s01": {"key": "k", "clip": "renders/s01.mp4", "poster": "renders/s01.jpg", "error": "scene threw"}})
+    c = client(p)
+    page = c.get("/shots").text
+    assert "scene threw" in page and "/files/renders/s01.jpg" in page and c.get("/files/renders/s01.jpg").status_code == 200
+
+
+def test_kinds_form_saves_and_rejects_empty(tmp_path, song):
+    p = project(tmp_path, song)
+    c = client(p)
+    assert c.post("/kinds", data={"kinds": ["animation"]}).status_code == 200 and p.kinds == ["animation"]
+    assert c.post("/kinds", data={}).status_code == 422 and p.kinds == ["animation"]
+    with run_lock(p):
+        assert c.post("/kinds", data={"kinds": ["footage"]}).status_code == 409
+
+
+def test_old_project_pages_unchanged(tmp_path, song):
+    p = project(tmp_path, song)
+    page = client(p).get("/shots").text
+    assert 'name="kind_' not in page and 'name="scene_' not in page and 'name="framing_s01"' in page
+    assert client(p).post("/shots", data={"action_s01": "x", "cast_s01": ["A"], "place_s01": "P", "framing_s01": "w"}).status_code == 200
+    assert p.load_shots()[0].kind == "footage" and p.load_shots()[0].scene is None
+
+
+def test_params_kept_for_displayed_default_template(tmp_path, song):
+    p = project(tmp_path, song, shots=False)
+    write_json(p.root / "project.json", p.config | {"kinds": ["animation"]})
+    c = client(p)
+    page = c.get("/shots").text
+    assert 'name="shown_s01" value="rings"' in page
+    form = {"action_s01": "a", "scene_s01": "rings", "shown_s01": "rings", "param_s01_count": "5"}
+    assert c.post("/shots", data=form).status_code == 200
+    assert p.load_shots()[0].scene["params"]["count"] == 5
+
+
+def test_switch_to_animation_without_scene_field_uses_fallback(tmp_path, song):
+    p = both(tmp_path, song)
+    assert client(p).post("/shots", data={"action_s01": "a", "kind_s01": "animation"}).status_code == 200
+    assert p.load_shots()[0].scene["template"] == "rings"
+    assert not p.scenes_dir.exists() or not any(p.scenes_dir.iterdir())
+
+
+def test_shots_rejects_kind_not_enabled(tmp_path, song):
+    p = project(tmp_path, song)
+    before = p.shots_path.read_text()
+    r = client(p).post("/shots", data={"action_s01": "a", "kind_s01": "animation", "scene_s01": "rings"})
+    assert r.status_code == 422 and "s01" in r.text and p.shots_path.read_text() == before

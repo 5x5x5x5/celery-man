@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "modal", "numpy", "librosa", "soundfile", "beat-this", "tokenizers", "huggingface_hub",
-  "openai", "fastapi", "uvicorn", "jinja2", "python-multipart", "pillow",
+  "openai", "fastapi", "uvicorn", "jinja2", "python-multipart", "pillow", "playwright>=1.64.0",
 ]
 
 [dependency-groups]

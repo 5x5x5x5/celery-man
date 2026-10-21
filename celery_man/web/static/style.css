@@ -58,6 +58,18 @@ tr.has-error td { border-bottom: 0; }
 .state-waiting, .state-judge { color: var(--accent); }
 .state-stale, .state-missing, .state-gen { font-style: italic; }
 
+/* look, scenes */
+.swatches { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin-bottom: .5rem; }
+.swatch label { margin: .25rem 0; }
+input[type="color"] { display: block; width: 3.5rem; height: 2rem; padding: 0; border: 1px solid var(--rule); background: none; }
+td.scene input[type="number"], td.scene input[type="text"] { max-width: 20rem; }
+td.scene select { max-width: 20rem; }
+td.scene label small { display: block; }
+textarea.code { font: .85rem/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+.poster { max-width: 16rem; margin-top: .75rem; }
+.hint { color: var(--muted); font-size: .9rem; }
+td select[name^="kind_"] { margin-top: .4rem; }
+
 /* images */
 .grid, .sheets { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 2rem 1.5rem; }
 figure { margin: 0; }

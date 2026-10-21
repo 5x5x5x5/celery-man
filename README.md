@@ -2,6 +2,8 @@
 
 A music-video pipeline with no theme built in. You give it a song; it times the song, writes a brief and a shot list, makes one still per shot (FLUX.1-schnell), makes draft clips from those stills (LTX-2.5, image-to-video), and assembles the video on the beat. Generation runs on Modal. Everything else runs on your machine.
 
+A shot is either **footage** (generated, as above) or **animation**: a small JavaScript scene drawn on a canvas in headless Chromium, driven by the song's beats and loudness. Animation is free and rendered locally; it never touches Modal and writes no ledger rows.
+
 Each creative decision is made by a person (**tastemaker**, in a local web page) or by a model (**auto**). The mode is set per decision, so you can mix them. Mechanical steps only read the decision files and never know which mode wrote them.
 
 | # | Decision | Tastemaker | Auto |
@@ -17,13 +19,14 @@ Each creative decision is made by a person (**tastemaker**, in a local web page)
 2. Modal: `uv run modal token new`.
 3. Create the Modal secret `huggingface` holding your `HF_TOKEN`.
 4. On Hugging Face, accept the terms for the LTX-2.x and FLUX.1-schnell repos with the same account.
-5. Check access: `uv run modal run celery_man/gen_modal.py::access` (both repos should print `OK`).
-6. Optional end-to-end check: `uv run modal run celery_man/gen_modal.py::smoke`. The first run downloads the weights into the Volume `celery-man-weights`. Verified on 2026-10-20: one 960x544, 121-frame, 5.04 s clip on an L4 in 173 s wall time, peak RAM 77.2 GiB.
+5. Animation shots: `uv run playwright install chromium` (headless Chromium renders them locally).
+6. Check access: `uv run modal run celery_man/gen_modal.py::access` (both repos should print `OK`).
+7. Optional end-to-end check: `uv run modal run celery_man/gen_modal.py::smoke`. The first run downloads the weights into the Volume `celery-man-weights`. Verified on 2026-10-20: one 960x544, 121-frame, 5.04 s clip on an L4 in 173 s wall time, peak RAM 77.2 GiB.
 
 ## Quick start
 
 ```
-uv run celery-man new projects/mine --song path/to/song.mp3 --source "where the song came from"
+uv run celery-man new projects/mine --song path/to/song.mp3 --source "where the song came from" [--kinds footage,animation]
 uv run celery-man modes projects/mine brief=auto shots=auto keyframes=auto takes=auto
 uv run celery-man serve projects/mine      # page at http://127.0.0.1:8765
 uv run celery-man run projects/mine        # advance as far as the modes allow
@@ -31,7 +34,7 @@ uv run celery-man quick projects/mine      # one cheap take per shot, whole song
 uv run celery-man status projects/mine
 ```
 
-`modes` takes `STEP=MODE` pairs; steps are `brief`, `shots`, `keyframes`, `takes`; modes are `tastemaker` or `auto`. New projects start all-tastemaker. `run` and `quick` ask before spending; `--yes` skips the question. `run` stops and exits 0 when a tastemaker decision is waiting; make it in the web page, then run again. `quick` exits 2 in that case. Reruns never regenerate a finished take. Editing the brief marks keyframes and picks stale, and nothing regenerates until you run again. `serve --port N` changes the port; the server binds to 127.0.0.1 only.
+`--kinds` is a comma list of `footage` and `animation` (default `footage`); it tells the auto shot planner and the web page which kinds of shot may be used. `modes` takes `STEP=MODE` pairs; steps are `brief`, `shots`, `keyframes`, `takes`; modes are `tastemaker` or `auto`. New projects start all-tastemaker. `run` and `quick` ask before spending; `--yes` skips the question. `run` stops and exits 0 when a tastemaker decision is waiting; make it in the web page, then run again. `quick` exits 2 in that case. Reruns never regenerate a finished take. Editing the brief marks keyframes and picks stale, and nothing regenerates until you run again. `serve --port N` changes the port; the server binds to 127.0.0.1 only.
 
 ## Project folder
 
@@ -43,6 +46,7 @@ uv run celery-man status projects/mine
 | `keyframes.json`, `picks.json` | decisions 3 and 4 |
 | `ledger.jsonl` | every job and verdict, with cost |
 | `keys/`, `takes/`, `sheets/` | stills, clips, contact sheets |
+| `scenes/`, `renders/`, `renders.json` | your custom scene files (`scenes/<name>.js`); rendered animation clips and their keys |
 | `out/video.mp4`, `out/report.md` | the result and a report (spend, takes per shot, mode per decision) |
 | `PROVENANCE.md` | song source, models, licenses |
 
@@ -61,8 +65,37 @@ Any OpenAI-compatible endpoint works. `api_key_env` names the environment variab
 - **vision** is used for auto keyframe checks and auto take picks. It needs a vision-capable model: a `llama-server` started with `--mmproj`, or a cloud model.
 - `quick` needs only the text role (and only when brief or shots are set to auto).
 
+## Animation shots
+
+A shot with `kind: "animation"` has a `scene`: `{"template": name, "params": {...}}` or `{"file": "scenes/<name>.js", "params": {...}}`. The brief's `look` (background, 1 to 5 colours, typeface: `serif`, `sans`, `mono` or `display`) styles every scene. Custom scene files go in the project's `scenes/` folder. Edit a scene or the look and only the affected shots re-render. Animation renders at 960x544, 24 fps, like footage.
+
+Templates (params, with defaults):
+
+| Template | Draws | Params |
+|---|---|---|
+| `bars` | stripes whose heights follow low, mid, high | `count` 3..64 (16), `orientation` horizontal/vertical (vertical) |
+| `burst` | particles thrown from the centre on each downbeat | `count` 10..1000 (150), `gravity` 0..3 (0.4) |
+| `drift` | particles along a flowing noise field | `count` 100..4000 (1200), `trail` 0..0.98 (0.85) |
+| `grid` | tiles that flash on beats, turn with the mids | `cols` 2..24 (8), `pulse` 0..1 (0.6) |
+| `rings` | rings born on each beat, expanding with loudness | `count` 1..32 (8), `thickness` 0.002..0.1 (0.012) |
+| `title` | one line of text, pulsing on downbeats | `text` (empty), `pulse` 0..1 (0.3), `fade` 0..32 (4) |
+| `words` | one word at a time on the beat | `text` (empty), `every` beat/bar (beat), `size` 0.04..0.4 (0.14), `position` center/lower/upper (center) |
+
+The scene contract (the same text the auto mode gives the model, `auto_scene.CONTRACT`):
+
+> A scene is plain JavaScript that defines two globals, no imports. `setup(env)` runs once (may be async). `draw(ctx, f, env)` draws one frame on a 2D canvas context; the canvas is NOT cleared between frames, so paint the background yourself.
+>
+> `env`: `params` (object), `look` (`{background: hex, colors: [hex], typeface}`; `typeface` is a font family for `ctx.font`), `width`, `height` (960x544), `fps` (24), `duration` (seconds), `random()` (seeded; `Math.random` is the same).
+>
+> `f`: `t` (s since shot start), `song_t` (s in the song), `progress` (0..1), `beat`, `bar` (indexes), `beat_phase`, `bar_phase` (0..1), `on_beat`, `on_downbeat` (bool), `level`, `low`, `mid`, `high` (0..1 loudness and band energy).
+>
+> `Date.now` and `performance.now` follow song time. Never use `new Date()`, `crypto`, `fetch` or any network. Each frame must draw in under 2 s. Draw with `env.look` colours.
+
+In auto mode the text model may write a custom scene; it is test-rendered, fixed up to 3 times on errors, then replaced by a template (the report lists these under "Scene fallbacks").
+
 ## Costs
 
+- Animation shots cost nothing.
 - A draft clip on an L4 costs roughly $0.07.
 - A 3.5-minute song costs roughly $4 for `quick` and roughly $11 per judged round.
 - The cap is $25 per project (`cap_usd`). When the cap runs out between rounds, each unfinished shot gets one quick take and the video still assembles. `run` refuses before its first spend if a quick pass over the range cannot fit.

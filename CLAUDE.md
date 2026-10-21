@@ -1,6 +1,6 @@
 # celery-man
 
-Theme-neutral music-video pipeline: timing, brief, shots, keyframes, takes, assemble. Generation on Modal.
+Theme-neutral music-video pipeline: timing, brief, shots, keyframes, takes, render, assemble. Animation shots are JS Canvas2D scenes rendered in headless Chromium (`animate.py`, `renders.py`); the render step makes their clips (free, local) and `assemble` treats them like takes. Generation on Modal.
 
 ## Commands
 - `uv sync`
@@ -16,4 +16,6 @@ Theme-neutral music-video pipeline: timing, brief, shots, keyframes, takes, asse
 - The web server binds to 127.0.0.1 only.
 - Never `git add -A`; add named paths. `projects/` and `smoke/` are git-ignored.
 - uv only, Python 3.12, type hints on public functions, `logging` not `print`.
+- Scene templates (`celery_man/scenes/templates`) draw only with `env.look` and params: no hard-coded colours or fonts.
+- Tests that launch Chromium are `@pytest.mark.slow`; everything else uses `FakeRenderer`. `playwright install chromium` is needed once.
 - Never cut prompt text silently; raise `PromptTooLong`.

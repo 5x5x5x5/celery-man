@@ -1,0 +1,38 @@
+{
+  "family": "type",
+  "description": "One word at a time, set large on the beat.",
+  "params": {
+    "text": {
+      "type": "string",
+      "default": "",
+      "max_len": 120,
+      "doc": "Words separated by spaces, shown one per step. Empty draws a plain dot instead."
+    },
+    "every": {
+      "type": "choice",
+      "default": "beat",
+      "choices": [
+        "beat",
+        "bar"
+      ],
+      "doc": "How often the next word appears."
+    },
+    "size": {
+      "type": "number",
+      "default": 0.14,
+      "min": 0.04,
+      "max": 0.4,
+      "doc": "Text height as a fraction of frame height."
+    },
+    "position": {
+      "type": "choice",
+      "default": "center",
+      "choices": [
+        "center",
+        "lower",
+        "upper"
+      ],
+      "doc": "Layout choice: vertical placement of the word."
+    }
+  }
+}

@@ -104,3 +104,14 @@ def test_gap_between_cuts_rejected(cuts_24, song, tmp_path):
 def test_contact_sheet_written(cuts_24, tmp_path):
     sheet = contact_sheet(cuts_24[0]["clip"], tmp_path / "sheets" / "a.jpg")
     assert sheet.exists() and sheet.stat().st_size > 0
+
+
+def test_clip_of_exactly_the_window_frames_fits(song, tmp_path):
+    # an off-grid window: round(end*24) - round(start*24) frames is a hair shorter than end - start
+    clip = tmp_path / "c.mp4"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24", "-frames:v", "37",
+         "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )  # fmt: skip
+    assemble([{"clip": str(clip), "in": 0, "start": 0.51, "end": 2.06}], song, tmp_path / "v.mp4")

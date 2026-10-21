@@ -105,3 +105,10 @@ def test_missing_dir_and_bad_shots_exit_2(tmp_path, song, caplog):
     p = make(tmp_path, song)
     write_json(p.shots_path, {"inputs": "x"})
     assert cli.main(["status", str(p.root)]) == 2
+
+
+def test_new_kinds(tmp_path, song):
+    assert cli.main(["new", str(tmp_path / "a"), "--song", str(song), "--kinds", "footage,animation"]) == 0
+    assert Project(tmp_path / "a").kinds == ["footage", "animation"]
+    assert cli.main(["new", str(tmp_path / "b"), "--song", str(song), "--kinds", "cartoon"]) == 2
+    assert not (tmp_path / "b").exists()

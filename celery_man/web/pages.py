@@ -1,15 +1,17 @@
 """The four decision pages: brief, shots, keyframes, takes. Every save goes through the same save_*/write_json the auto steps use."""
 
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from celery_man import templates as scene_templates
 from celery_man.compose import TOKEN_LIMIT, PromptTooLong, compose, count_tokens
 from celery_man.ledger import Ledger
 from celery_man.pipeline import run_busy
-from celery_man.project import STYLE_KEYS, Project, Shot, brief_from_dict, read_json, write_json
+from celery_man.project import DEFAULT_LOOK, STYLE_KEYS, TYPEFACES, Project, Shot, brief_from_dict, read_json, shot_from_dict, write_json
 from celery_man.steps import IN_POINT, MAX_ROUND, TAKE_MODEL, brief_inputs, kf_need, shots_inputs, windows
 from celery_man.takes import TakePlan, sheet, take_plan
 
@@ -49,10 +51,10 @@ def _editable(request: Request, step: str) -> None:
 
 def _brief_page(request: Request, d: dict | None, error: str = "", code: int = 200):
     p = _p(request)
-    d = d or {"logline": "", "style": dict.fromkeys(STYLE_KEYS, ""), "cast": [], "places": [], "avoid": []}
+    d = d or {"logline": "", "style": dict.fromkeys(STYLE_KEYS, ""), "cast": [], "places": [], "avoid": [], "look": DEFAULT_LOOK}
     blank = [{"name": "", "description": ""}] * BLANK_ROWS
     return render(request, "brief.html", code, b=d, cast=d["cast"] + blank, places=d["places"] + blank, style_keys=STYLE_KEYS,
-                  auto=p.modes["brief"] == "auto", error=error)  # fmt: skip
+                  look=d.get("look") or DEFAULT_LOOK, typefaces=TYPEFACES, auto=p.modes["brief"] == "auto", error=error)  # fmt: skip
 
 
 def _named(form, kind: str) -> list[dict]:
@@ -80,6 +82,13 @@ async def brief_post(request: Request):
         "cast": _named(form, "cast"),
         "places": _named(form, "place"),
         "avoid": [a.strip() for a in form.get("avoid", "").splitlines() if a.strip()],
+        "look": {
+            "background": form.get("background", DEFAULT_LOOK["background"]),
+            "colors": [form[k] for i in range(1, 6) if f"unused_{i}" not in form and (k := f"color_{i}") in form]
+            if "color_1" in form
+            else DEFAULT_LOOK["colors"],
+            "typeface": form.get("typeface", DEFAULT_LOOK["typeface"]),
+        },
     }
     try:
         b = brief_from_dict(d)
@@ -102,16 +111,74 @@ def _check(shot: Shot, brief) -> dict:
         return {"tokens": None, "error": str(e)}
 
 
-def _shots_page(request: Request, shots: list[Shot] | None, code: int = 200):
+def _row(p: Project, s: Shot, brief) -> dict:
+    """One shots-page row: footage rows get compose's token check; animation rows get the scene form and the last render."""
+    if s.kind == "footage":
+        return {"s": s} | _check(s, brief)
+    r = {"s": s, "tokens": None, "error": "", "tpl": s.scene.get("template", "custom") if s.scene else "custom", "specs": {}, "code": ""}
+    cat = scene_templates.catalogue()
+    if r["tpl"] in cat:
+        r["specs"] = cat[r["tpl"]]["params"]
+    elif s.scene and "file" in s.scene and (f := p.root / s.scene["file"]).is_file():
+        r["code"] = f.read_text()
+    entry = (read_json(p.renders_path) or {}).get(s.id) or {}
+    poster = entry.get("poster")
+    return r | {"render_error": entry.get("error", ""), "poster": poster if poster and (p.root / poster).is_file() else ""}
+
+
+def _default_scene() -> dict:
+    return {"template": scene_templates.FALLBACK_TEMPLATE, "params": {}}
+
+
+def _shots_page(request: Request, shots: list[Shot] | None, code: int = 200, errors: dict | None = None, codes: dict | None = None):
     p = _p(request)
     brief, ctx = p.load_brief(), {"auto": p.modes["shots"] == "auto", "rows": [], "brief": None}
     if not p.timing_path.exists() or brief is None:
         return render(request, "shots.html", code, timing=p.timing_path.exists(), **ctx)
     if shots is None:
         old = {s.id: s for s in p.load_shots() or []}
-        shots = [old.get(f"s{i:02d}", Shot(f"s{i:02d}", a, z, sec, "", [], None, "")) for i, (a, z, sec) in enumerate(windows(p), 1)]
-    rows = [{"s": s} | _check(s, brief) for s in shots]
-    return render(request, "shots.html", code, timing=True, **ctx | {"rows": rows, "brief": brief})
+        kind = p.kinds[0] if len(p.kinds) == 1 else "footage"
+        scene = None if kind == "footage" else _default_scene()
+        shots = [
+            old.get(f"s{i:02d}") or Shot(f"s{i:02d}", a, z, sec, "", [], None, "", kind, scene)
+            for i, (a, z, sec) in enumerate(windows(p), 1)
+        ]
+    rows = [_row(p, s, brief) for s in shots]
+    for r in rows:
+        r["error"] = (errors or {}).get(r["s"].id) or r["error"]
+        r["code"] = (codes or {}).get(r["s"].id, r["code"]) if r["s"].kind == "animation" else ""
+    return render(request, "shots.html", code, timing=True, **ctx | {"rows": rows, "brief": brief, "both": len(p.kinds) > 1,
+                  "templates": sorted(scene_templates.catalogue())})  # fmt: skip
+
+
+def _param(spec: dict, raw):
+    """The form value as the spec's type; a value that does not parse is passed on as the raw string so validation names it."""
+    try:
+        return {"integer": int, "number": float}.get(spec["type"], str)(raw)
+    except ValueError:
+        return raw
+
+
+def _scene(form, sid: str, old: Shot | None) -> tuple[dict, str | None]:
+    """The scene dict and (for a custom scene) the code to save. Params start at defaults unless the template is unchanged."""
+    prev = old.scene if old and old.scene else {}
+    choice = form.get(f"scene_{sid}") or ("custom" if "file" in prev else scene_templates.FALLBACK_TEMPLATE)
+    note = {"note": prev["note"]} if "note" in prev else {}
+    if choice == "custom":
+        code = form.get(f"code_{sid}")
+        if code is None:  # just switched to custom: start from the template that was there
+            code = scene_templates.source(
+                prev["template"] if prev.get("template") in scene_templates.catalogue() else scene_templates.FALLBACK_TEMPLATE
+            )
+        return {"file": f"scenes/{sid}.js", "params": prev["params"] if "file" in prev else {}} | note, code
+    params = {}
+    if form.get(f"shown_{sid}", prev.get("template")) == choice:  # the inputs on screen were this template's
+        for k, spec in scene_templates.catalogue().get(choice, {}).get("params", {}).items():
+            if spec["type"] == "bool":
+                params[k] = f"param_{sid}_{k}" in form
+            elif f"param_{sid}_{k}" in form:
+                params[k] = _param(spec, form[f"param_{sid}_{k}"])
+    return {"template": choice, "params": params} | note, None
 
 
 @router.get("/shots")
@@ -126,14 +193,33 @@ async def shots_post(request: Request):
     brief, form = p.load_brief(), await request.form()
     if brief is None or not p.timing_path.exists():
         raise HTTPException(409, "save the brief and run once to analyse the song first")
-    shots = []
+    old = {s.id: s for s in p.load_shots() or []}
+    shots, errors, codes = [], {}, {}
     for i, (a, z, sec) in enumerate(windows(p), 1):
         sid = f"s{i:02d}"
+        kind = form.get(f"kind_{sid}") or (p.kinds[0] if len(p.kinds) == 1 else old[sid].kind if sid in old else "footage")
+        if kind not in p.kinds:
+            raise HTTPException(422, f"{sid}: kind {kind!r} is not enabled for this project")
         place = form.get(f"place_{sid}") or None
-        shots.append(Shot(sid, a, z, sec, form.get(f"action_{sid}", "").strip(), form.getlist(f"cast_{sid}"), place,
-                          form.get(f"framing_{sid}", "").strip()))  # fmt: skip
-    if any(_check(s, brief)["error"] for s in shots):
-        return _shots_page(request, shots, 422)
+        scene, code = (None, None) if kind == "footage" else _scene(form, sid, old.get(sid))
+        s = Shot(sid, a, z, sec, form.get(f"action_{sid}", "").strip(), form.getlist(f"cast_{sid}"), place,
+                 form.get(f"framing_{sid}", "").strip(), kind, scene)  # fmt: skip
+        if code is not None:
+            codes[sid] = code
+        try:
+            s = shot_from_dict(asdict(s))
+            if code is not None and not code.strip():
+                raise ValueError("custom scene: the code is empty")
+        except ValueError as e:
+            errors[sid] = f"{sid}: {e}"
+        if kind == "footage" and (err := _check(s, brief)["error"]):
+            errors[sid] = err
+        shots.append(s)
+    if errors:
+        return _shots_page(request, shots, 422, errors, codes)
+    p.scenes_dir.mkdir(exist_ok=True)
+    for sid, code in codes.items():
+        (p.scenes_dir / f"{sid}.js").write_text(code)
     p.save_shots(shots, shots_inputs(p, brief))
     return RedirectResponse("/shots", 303)
 
@@ -144,7 +230,7 @@ async def shots_post(request: Request):
 @router.get("/keyframes")
 def keyframes_get(request: Request):
     p = _p(request)
-    brief, shots, kfs = p.load_brief(), p.load_shots() or [], read_json(p.keyframes_path) or {}
+    brief, shots, kfs = p.load_brief(), p.load_footage() or [], read_json(p.keyframes_path) or {}
     rows = [{"s": s, "kf": kfs.get(s.id), "need": kf_need(p, s, brief, kfs.get(s.id))} for s in shots] if brief else []
     return render(request, "keyframes.html", rows=rows, auto=p.modes["keyframes"] == "auto")
 
@@ -175,7 +261,7 @@ def _choices(led: Ledger, sid: str, plan: TakePlan) -> tuple[int, list[str]]:
 
 
 def _plan(p: Project, led: Ledger, sid: str) -> TakePlan:
-    brief, shots = p.load_brief(), {s.id: s for s in p.load_shots() or []}
+    brief, shots = p.load_brief(), {s.id: s for s in p.load_footage() or []}
     if brief is None or sid not in shots:
         raise HTTPException(404)
     return take_plan(p, led, shots[sid], brief, (read_json(p.keyframes_path) or {}).get(sid), (read_json(p.picks_path) or {}).get(sid))
@@ -185,7 +271,7 @@ def _plan(p: Project, led: Ledger, sid: str) -> TakePlan:
 def takes_get(request: Request):
     p = _p(request)
     led, rows = Ledger(p.ledger_path, p.cap_usd), []
-    picks, shots = read_json(p.picks_path) or {}, (p.load_shots() or []) if p.load_brief() else []
+    picks, shots = read_json(p.picks_path) or {}, (p.load_footage() or []) if p.load_brief() else []
     for s in shots:
         plan = _plan(p, led, s.id)
         rnd, keys = _choices(led, s.id, plan)

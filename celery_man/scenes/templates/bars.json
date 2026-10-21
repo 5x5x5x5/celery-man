@@ -1,0 +1,22 @@
+{
+  "family": "geometric",
+  "description": "Stripes whose heights follow the low, mid and high bands.",
+  "params": {
+    "count": {
+      "type": "integer",
+      "default": 16,
+      "min": 3,
+      "max": 64,
+      "doc": "Number of stripes."
+    },
+    "orientation": {
+      "type": "choice",
+      "default": "vertical",
+      "choices": [
+        "horizontal",
+        "vertical"
+      ],
+      "doc": "Layout choice: stripes stand up or lie across."
+    }
+  }
+}
