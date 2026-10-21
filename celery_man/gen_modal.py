@@ -138,6 +138,7 @@ class Animator:
             use_stream=True,
             low_cpu_mem_usage=True,
         )
+        self.pipe.vae.enable_tiling()  # keeps the 121-frame decode inside L4 memory
 
     @modal.method()
     def clip(self, keyframe: bytes, prompt: str, seed: int) -> dict:

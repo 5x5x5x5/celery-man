@@ -40,7 +40,7 @@ class Generator(Protocol):
 class FakeGenerator:
     """No Modal, no network: solid-colour PNGs and ffmpeg test-pattern clips."""
 
-    def __init__(self, fail: set[str] = frozenset()) -> None:
+    def __init__(self, fail: frozenset[str] | set[str] = frozenset()) -> None:
         self.fail = set(fail)
 
     def session(self) -> ContextManager:
