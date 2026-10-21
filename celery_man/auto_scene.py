@@ -70,7 +70,11 @@ def settle(chat_fn: ChatFn, run: Run, shot: Shot, brief: Brief, code: str) -> Sh
     err = ""
     for n in range(TRIES):
         if n:
-            code = fix_code(chat_fn, shot, brief, code, err)
+            try:
+                code = fix_code(chat_fn, shot, brief, code, err)
+            except AutoError as e:  # no usable fix: fall back rather than stall the run
+                log.warning("%s: no fix from the model (%s)", shot.id, e)
+                break
         path.write_text(code)
         if not (err := renders.render_shot(run, shot, brief)):
             return replace(shot, scene={**shot.scene, "note": ""})

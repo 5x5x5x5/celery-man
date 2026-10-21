@@ -60,3 +60,11 @@ def test_auto_shots_settle_and_render_step_reuses(tmp_path, song):
     s01 = p.load_shots()[0]
     assert s01.scene == FILE | {"note": ""} and (p.root / "scenes/s01.js").is_file()
     assert [j.shot_id for j in r.jobs] == ["s01"]
+
+
+def test_unfixable_reply_falls_back_to_template(tmp_path, song):
+    run, shot, brief, r = setup_run(tmp_path, song)
+    chat = stub("junk", "junk", "junk", json.dumps({"template": "grid", "params": {}}))
+    out = auto_scene.settle(chat, run, shot, brief, "throw 1")
+    assert out.scene["template"] == "grid" and out.scene["note"].startswith("fallback:") and "scene threw" in out.scene["note"]
+    assert len(r.jobs) == 1
