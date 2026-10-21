@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass
 
-from celery_man import steps
+from celery_man import steps, takes
 from celery_man.auto import ChatFn
 from celery_man.generate import Generator
 from celery_man.ledger import Ledger, cost
@@ -17,7 +17,7 @@ RUNNERS = {
     "brief": steps.run_brief,
     "shots": steps.run_shots,
     "keyframes": steps.run_keyframes,
-    "takes": steps.run_takes,
+    "takes": takes.run_takes,
     "assemble": steps.run_assemble,
 }
 MAX_PASSES = 20
@@ -61,7 +61,7 @@ def status(p: Project) -> list[StepState]:
         return out + [StepState(s, "missing") for s in STEPS[3:]]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
     out.append(_per_shot(p, "keyframes", {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in shots}, {"judge"}, bool(kfs)))
-    needs = {s.id: steps.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need for s in shots}
+    needs = {s.id: takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need for s in shots}
     out.append(_per_shot(p, "takes", needs, {"judge", "edit"}, p.picks_path.exists()))
     video = p.out_dir / "video.mp4"
     if not video.exists():
@@ -80,7 +80,7 @@ def estimate(p: Project) -> float:
         return 0.0
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
     n_kf = sum(steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" for s in shots)
-    n_takes = sum(steps.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing for s in shots)
+    n_takes = sum(takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing for s in shots)
     return cost(n_kf, steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 
 
