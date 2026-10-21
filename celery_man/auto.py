@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,21 @@ def _brief_text(b: Brief) -> str:
     )
 
 
+def _lenient_brief(d: Any) -> Any:
+    """Repair the usual small-model slips; brief_from_dict stays strict."""
+    if not isinstance(d, dict):
+        return d
+    d = dict(d)
+    if isinstance(d.get("avoid"), str):
+        d["avoid"] = [x.strip() for x in re.split(r"[,;]", d["avoid"]) if x.strip()]
+    for k in ("cast", "places"):
+        if isinstance(d.get(k), dict):
+            d[k] = [d[k]]
+    if isinstance(d.get("style"), dict):
+        d["style"] = {k: ", ".join(map(str, v)) if isinstance(v, list) else v for k, v in d["style"].items()}
+    return d
+
+
 def write_brief(chat_fn: ChatFn, seed: str) -> Brief:
     system = (
         "You write a creative brief for a short music video. " + CRAFT + " Keys: logline (str), style (object with "
@@ -64,7 +80,7 @@ def write_brief(chat_fn: ChatFn, seed: str) -> Brief:
         "avoid ([str]). Descriptions are visual and self-contained."
     )
     user = f"Seed: {seed}" if seed.strip() else "No seed given: invent the theme freely."
-    return ask_json(chat_fn, system, user, [], brief_from_dict)
+    return ask_json(chat_fn, system, user, [], lambda d: brief_from_dict(_lenient_brief(d)))
 
 
 def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]]) -> list[Shot]:

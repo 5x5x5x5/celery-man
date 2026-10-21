@@ -75,11 +75,12 @@ def _exact(d, keys: tuple, what: str) -> None:
 def _is(v, t, what: str) -> None:
     ok = isinstance(v, t) and not isinstance(v, bool) if t in (int, float, (int, float)) else isinstance(v, t)
     if not ok:
-        raise ValueError(f"{what}: bad type {type(v).__name__}")
+        want = "/".join(x.__name__ for x in (t if isinstance(t, tuple) else (t,)))
+        raise ValueError(f"{what}: expected {want}, got {type(v).__name__}")
 
 
 def _named(items, cls, what: str) -> list:
-    _is(items, list, what)
+    _is(items, list, f"{what} (a list of objects with name and description)")
     out = []
     for it in items:
         _exact(it, ("name", "description"), what)
@@ -95,7 +96,7 @@ def brief_from_dict(d) -> Brief:
     _exact(d["style"], STYLE_KEYS, "style")
     for k in STYLE_KEYS:
         _is(d["style"][k], str, f"style.{k}")
-    _is(d["avoid"], list, "avoid")
+    _is(d["avoid"], list, "avoid (a list of strings)")
     for a in d["avoid"]:
         _is(a, str, "avoid")
     return Brief(
