@@ -4,7 +4,7 @@ Theme-neutral music-video pipeline: timing, brief, shots, keyframes, takes, asse
 
 ## Commands
 - `uv sync`
-- `uv run pytest -m "not slow"` (tests in `tests/`)
+- `uv run pytest` (tests in `tests/`; skips slow tests), `uv run pytest -m slow` for the slow ones
 - `uv run ruff check` / `uv run ruff format` (line length 140)
 - `uv run celery-man {new,status,modes,run,quick,serve} DIR` (see README)
 - `uv run modal run celery_man/gen_modal.py::access` / `::smoke` (costs money, ask first)

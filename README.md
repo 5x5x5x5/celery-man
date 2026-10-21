@@ -79,4 +79,4 @@ LTX-2.x is under the LTX-2.x Community License. FLUX.1-schnell is Apache-2.0. Ea
 
 ## Development
 
-`uv run pytest -m "not slow"`, `uv run ruff check`, `uv run ruff format`.
+`uv run pytest` (skips slow tests; `uv run pytest -m slow` runs them), `uv run ruff check`, `uv run ruff format`.

@@ -23,6 +23,7 @@ packages = ["celery_man"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 markers = ["slow: slow tests"]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 line-length = 140

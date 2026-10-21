@@ -109,9 +109,10 @@ def _sections(y: np.ndarray, sr: int, beats: list[float], downbeats: list[float]
     frames = librosa.time_to_frames(beats, sr=sr)
     feats = np.vstack([librosa.feature.chroma_cqt(y=y, sr=sr), librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)])
     feats = (feats - feats.mean(axis=1, keepdims=True)) / (feats.std(axis=1, keepdims=True) + 1e-9)
-    synced = librosa.util.sync(feats, frames)  # column c starts at frame ([0] + frames)[c]
+    synced = librosa.util.sync(feats, frames)
     k = max(2, round(duration / 30))
-    starts = np.concatenate([[0], frames])
+    # sync cuts at fix_frames(frames, 0, n) (deduped, clipped, 0 and n added), so column c starts at its c-th entry
+    starts = librosa.util.fix_frames(frames, x_min=0, x_max=feats.shape[1])[:-1]
     bounds = librosa.frames_to_time(starts[librosa.segment.agglomerative(synced, min(k, synced.shape[1]))], sr=sr)
     # shortcut: labels are "1", "2", ... in order, not matched across repeats; upgrade if repeat-aware labels are needed
     cuts = sorted({_nearest(downbeats, t) for t in bounds[1:]} - {downbeats[0]})
