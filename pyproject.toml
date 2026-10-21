@@ -1,0 +1,28 @@
+[project]
+name = "celery-man"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "modal", "numpy", "librosa", "soundfile", "beat-this", "tokenizers", "huggingface_hub",
+  "openai", "fastapi", "uvicorn", "jinja2", "python-multipart", "pillow",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "httpx"]
+
+[project.scripts]
+celery-man = "celery_man.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["celery_man"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = ["slow: slow tests"]
+
+[tool.ruff]
+line-length = 140
