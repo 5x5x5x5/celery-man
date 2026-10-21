@@ -6,7 +6,7 @@
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 <section>
   <h2>Steps</h2>
-  <form method="post" action="/modes">
+  <form method="post" action="/modes"><fieldset{% if running %} disabled{% endif %}>
   <table class="steps">
     <thead><tr><th>Step</th><th>State</th><th>Mode</th><th>Detail</th></tr></thead>
     <tbody>
@@ -23,7 +23,7 @@
     {% endfor %}
     </tbody>
   </table>
-  <button type="submit">Save modes</button>
+  <button type="submit">Save modes</button></fieldset>
   </form>
 </section>
 <section>

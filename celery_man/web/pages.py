@@ -18,15 +18,23 @@ BLANK_ROWS = 3
 
 
 def render(request: Request, name: str, code: int = 200, **ctx):
-    return templates.TemplateResponse(request, name, ctx | {"limit": TOKEN_LIMIT}, status_code=code)
+    ctx = ctx | {"limit": TOKEN_LIMIT, "running": request.app.state.runner.running}
+    return templates.TemplateResponse(request, name, ctx, status_code=code)
 
 
 def _p(request: Request) -> Project:
     return request.app.state.p
 
 
-def _editable(p: Project, step: str) -> None:
-    if p.modes[step] != "tastemaker":
+def guard_run(request: Request) -> None:
+    """Every decision write: a run rewrites these files from what it read at its start, so a save now would be lost."""
+    if request.app.state.runner.running:
+        raise HTTPException(409, "a run is going; save when it finishes")
+
+
+def _editable(request: Request, step: str) -> None:
+    guard_run(request)
+    if _p(request).modes[step] != "tastemaker":
         raise HTTPException(409, f"{step} is set by auto; switch it to tastemaker to edit")
 
 
@@ -42,7 +50,10 @@ def _brief_page(request: Request, d: dict | None, error: str = "", code: int = 2
 
 
 def _named(form, kind: str) -> list[dict]:
-    rows = zip(form.getlist(f"{kind}_name"), form.getlist(f"{kind}_description"), strict=True)
+    names, descs = form.getlist(f"{kind}_name"), form.getlist(f"{kind}_description")
+    if len(names) != len(descs):
+        raise HTTPException(422, f"{kind}: every row needs a name and a description field")
+    rows = zip(names, descs, strict=True)
     return [{"name": n.strip(), "description": d.strip()} for n, d in rows if n.strip()]
 
 
@@ -55,7 +66,7 @@ def brief_get(request: Request):
 @router.post("/brief")
 async def brief_post(request: Request):
     p = _p(request)
-    _editable(p, "brief")
+    _editable(request, "brief")
     form = await request.form()
     d = {
         "logline": form.get("logline", "").strip(),
@@ -105,7 +116,7 @@ def shots_get(request: Request):
 @router.post("/shots")
 async def shots_post(request: Request):
     p = _p(request)
-    _editable(p, "shots")
+    _editable(request, "shots")
     brief, form = p.load_brief(), await request.form()
     if brief is None or not p.timing_path.exists():
         raise HTTPException(409, "save the brief and run once to analyse the song first")
@@ -135,7 +146,7 @@ def keyframes_get(request: Request):
 @router.post("/keyframes/{sid}")
 async def keyframes_post(request: Request, sid: str):
     p = _p(request)
-    _editable(p, "keyframes")
+    _editable(request, "keyframes")
     form, kfs = await request.form(), read_json(p.keyframes_path) or {}
     if sid not in kfs or form.get("verdict") not in ("approve", "reject"):
         raise HTTPException(404 if sid not in kfs else 400)
@@ -148,7 +159,7 @@ async def keyframes_post(request: Request, sid: str):
 
 
 def _choices(led: Ledger, sid: str, plan: TakePlan) -> tuple[int, list[str]]:
-    """(round, pickable keys): the round being judged, or round 2 of the lineage once it is at the limit (R6)."""
+    """(round, takes shown): the round being judged, or round 2 of the lineage once it is at the limit (R6)."""
     if plan.need == "judge":
         return plan.round, [k for k, _ in plan.keys if led.done(k)]
     if plan.need == "limit":
@@ -180,11 +191,11 @@ def takes_get(request: Request):
 @router.post("/takes/{sid}/pick")
 async def takes_pick(request: Request, sid: str):
     p = _p(request)
-    _editable(p, "takes")
+    _editable(request, "takes")
     led, key = Ledger(p.ledger_path, p.cap_usd), (await request.form()).get("key")
     plan = _plan(p, led, sid)
     rnd, keys = _choices(led, sid, plan)
-    if key not in keys:
+    if key not in keys or not sheet(p, key):  # a take without a contact sheet is unreadable: never pickable
         raise HTTPException(400, "not a take of this round")
     picks = read_json(p.picks_path) or {}
     picks[sid] = {"key": key, "clip": f"{p.takes_dir.name}/{key}.mp4", "in": IN_POINT, "round": rnd, "gen": plan.gen, "quick": False}
@@ -195,7 +206,7 @@ async def takes_pick(request: Request, sid: str):
 @router.post("/takes/{sid}/reject")
 async def takes_reject(request: Request, sid: str):
     p = _p(request)
-    _editable(p, "takes")
+    _editable(request, "takes")
     reason = (await request.form()).get("reason", "").strip()
     plan = _plan(p, Ledger(p.ledger_path, p.cap_usd), sid)
     if plan.need != "judge" or plan.round >= MAX_ROUND or not reason:

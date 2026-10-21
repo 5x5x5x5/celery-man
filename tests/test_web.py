@@ -24,7 +24,11 @@ def project(tmp_path, song, brief=True, shots=True):
 
 
 def client(p, gen_factory=FakeGenerator) -> TestClient:
-    return TestClient(create_app(p, gen_factory, lambda p: (text_chat, vision_chat())))
+    return local(create_app(p, gen_factory, lambda p: (text_chat, vision_chat())))
+
+
+def local(app) -> TestClient:
+    return TestClient(app, base_url="http://127.0.0.1:8765")
 
 
 def to_judging(p):
@@ -155,7 +159,7 @@ def test_second_run_conflicts(tmp_path, song):
         return made[-1]
 
     app = create_app(p, slow_gen, lambda p: (text_chat, vision_chat()))
-    c = TestClient(app)
+    c = local(app)
     assert c.post("/run", follow_redirects=False).status_code == 303
     assert "running" in c.get("/").text
     assert c.post("/run").status_code == 409
@@ -174,7 +178,7 @@ def test_run_error_is_shown(tmp_path, song):
         raise RuntimeError("no generator today")
 
     app = create_app(p, boom, lambda p: (None, None))
-    c = TestClient(app)
+    c = local(app)
     c.post("/run")
     app.state.runner.thread.join(10)
     assert "no generator today" in c.get("/").text
@@ -188,3 +192,68 @@ def test_overview_and_modes(tmp_path, song):
     c.post("/modes", data={"brief": "tastemaker", "shots": "tastemaker", "keyframes": "auto", "takes": "auto"})
     assert p.modes == {"brief": "tastemaker", "shots": "tastemaker", "keyframes": "auto", "takes": "auto"}
     assert c.post("/modes", data={"brief": "sideways"}).status_code == 400
+
+
+def held_run(p):
+    """An app whose run is stuck in gen_factory until the returned event is set."""
+    go = threading.Event()
+    app = create_app(p, lambda: go.wait(10) and FakeGenerator(), lambda p: (text_chat, vision_chat()))
+    return app, local(app), go
+
+
+def test_saves_refused_while_running(tmp_path, song):
+    p = project(tmp_path, song)
+    advance(p, FakeGenerator())
+    before = p.keyframes_path.read_text()
+    app, c, go = held_run(p)
+    c.post("/run")
+    assert c.post("/keyframes/s01", data={"verdict": "approve", "note": ""}).status_code == 409
+    assert c.post("/brief", data={"logline": "x"}).status_code == 409
+    assert "<fieldset disabled>" in c.get("/brief").text and "Approve" not in c.get("/keyframes").text
+    go.set()
+    app.state.runner.thread.join(10)
+    assert p.keyframes_path.read_text() == before
+
+
+def test_foreign_origin_and_host_refused(tmp_path, song):
+    p = project(tmp_path, song)
+    app, c, go = held_run(p)
+    assert c.post("/run", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert c.post("/run", headers={"Origin": "null"}).status_code == 403
+    assert c.post("/run", headers={"Referer": "http://evil.example/x"}).status_code == 403
+    assert not app.state.runner.running and app.state.runner.thread is None
+    assert c.get("/", headers={"Host": "evil.example:8765"}).status_code == 400
+    assert c.get("/", headers={"Host": "localhost:8765"}).status_code == 200
+    assert c.post("/modes", headers={"Origin": "http://127.0.0.1:8765"}, data={"brief": "tastemaker"}).status_code == 200
+    go.set()
+
+
+def test_unusable_take_cannot_be_picked(tmp_path, song):
+    p = project(tmp_path, song)
+    to_judging(p)
+    key = min(r["key"] for r in Ledger(p.ledger_path).rows() if r.get("shot") == "s01" and r.get("model") == "ltx-2.5-draft")
+    (p.takes_dir / f"{key}.mp4").write_bytes(b"not an mp4")
+    (p.sheets_dir / f"{key}.jpg").unlink()
+    c = client(p)
+    assert c.post("/takes/s01/pick", data={"key": key}).status_code == 400
+    assert not p.picks_path.exists()
+
+
+def test_brief_unequal_rows_is_422(tmp_path, song):
+    p = project(tmp_path, song, brief=False, shots=False)
+    r = client(p).post("/brief", data={"logline": "x", "cast_name": ["A", "B"], "cast_description": ["a tall person"]})
+    assert r.status_code == 422 and not p.brief_path.exists()
+
+
+def test_overview_survives_broken_project_json(tmp_path, song):
+    p = project(tmp_path, song)
+    (p.root / "project.json").write_text("{")
+    r = client(p).get("/")
+    assert r.status_code == 200 and "JSONDecodeError" in r.text
+
+
+def test_files_route_blocks_symlink_out(tmp_path, song):
+    p = project(tmp_path, song)
+    (tmp_path / "secret.txt").write_text("x")
+    (p.root / "link.txt").symlink_to(tmp_path / "secret.txt")
+    assert client(p).get("/files/link.txt").status_code == 404

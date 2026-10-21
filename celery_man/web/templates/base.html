@@ -17,6 +17,7 @@
   </nav>
 </header>
 <main>
+{% if running %}<p class="note">A run is going: decisions can be saved when it finishes. <a href="/">Overview</a>.</p>{% endif %}
 {% if auto %}<p class="note">This step is set by auto — switch this step to tastemaker to edit.</p>{% endif %}
 {% block main %}{% endblock %}
 </main>

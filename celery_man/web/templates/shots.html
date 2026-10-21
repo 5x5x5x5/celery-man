@@ -8,7 +8,7 @@
 <p>Save the <a href="/brief">brief</a> first: shots draw on its cast and places.</p>
 {% else %}
 <form method="post" action="/shots">
-<fieldset{% if auto %} disabled{% endif %}>
+<fieldset{% if auto or running %} disabled{% endif %}>
 <table class="shots">
   <thead><tr><th>Shot</th><th>Action</th><th>Cast</th><th>Place</th><th>Framing</th><th>Tokens</th></tr></thead>
   <tbody>

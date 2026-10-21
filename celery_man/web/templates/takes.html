@@ -19,11 +19,11 @@
       <figure>
         {% if sh %}<img src="/files/{{ sh }}" alt="contact sheet {{ key }}">{% else %}<div class="empty">unusable clip</div>{% endif %}
         <figcaption><a href="/files/takes/{{ key }}.mp4">{{ key }}</a></figcaption>
-        {% if sh and not auto %}<form method="post" action="/takes/{{ s.id }}/pick"><input type="hidden" name="key" value="{{ key }}"><button class="primary">Pick</button></form>{% endif %}
+        {% if sh and not (auto or running) %}<form method="post" action="/takes/{{ s.id }}/pick"><input type="hidden" name="key" value="{{ key }}"><button class="primary">Pick</button></form>{% endif %}
       </figure>
     {% endfor %}
     </div>
-    {% if not auto and plan.need == "judge" %}
+    {% if not (auto or running) and plan.need == "judge" %}
     <form method="post" action="/takes/{{ s.id }}/reject" class="inline">
       {% set last = r.round >= r.max_round %}
       <input name="reason" required placeholder="why none works" aria-label="{{ s.id }} reason"{% if last %} disabled{% endif %}>

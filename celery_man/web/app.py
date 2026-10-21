@@ -4,18 +4,20 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from celery_man.ledger import Ledger
 from celery_man.pipeline import advance, estimate, status
 from celery_man.project import DEFAULT_MODES, Project, write_json
-from celery_man.web.pages import render, router
+from celery_man.web.pages import guard_run, render, router
 
 log = logging.getLogger(__name__)
 MODES = ("tastemaker", "auto")
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
 class Runner:
@@ -53,19 +55,31 @@ def create_app(project: Project, gen_factory: Callable, chat_factory: Callable) 
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
     app.include_router(router)
 
+    @app.middleware("http")
+    async def same_origin(request: Request, call_next):
+        """Any web page can make the browser POST to localhost (and start paid runs): accept only our own pages."""
+        host = request.headers.get("host", "")
+        if urlsplit(f"//{host}").hostname not in LOCAL_HOSTS:
+            return PlainTextResponse("unexpected Host", 400)
+        src = request.headers.get("origin") or request.headers.get("referer")
+        if request.method == "POST" and src is not None and urlsplit(src).netloc != host:
+            return PlainTextResponse("cross-site request refused", 403)
+        return await call_next(request)
+
     @app.get("/")
     def overview(request: Request):
         p, runner = project, app.state.runner
         try:
-            sts, est, err = status(p), estimate(p), ""
-        except Exception as e:  # noqa: BLE001 - show a broken decision file instead of a 500
-            sts, est, err = [], 0.0, f"{type(e).__name__}: {e}"
-        spent = Ledger(p.ledger_path, p.cap_usd).spent_usd()
-        return render(request, "overview.html", steps=sts, est=est, spent=spent, cap=p.cap_usd, modes=p.modes,
-                      choices=MODES, running=runner.running, error=runner.error or err)  # fmt: skip
+            cap, modes = p.cap_usd, p.modes
+            sts, est, spent, err = status(p), estimate(p), Ledger(p.ledger_path, cap).spent_usd(), ""
+        except Exception as e:  # noqa: BLE001 - show a broken project file instead of a 500
+            sts, est, spent, cap, modes, err = [], 0.0, 0.0, 0.0, {}, f"{type(e).__name__}: {e}"
+        return render(request, "overview.html", steps=sts, est=est, spent=spent, cap=cap, modes=modes, choices=MODES,
+                      error=runner.error or err)  # fmt: skip
 
     @app.post("/modes")
     async def modes(request: Request):
+        guard_run(request)
         form = await request.form()
         new = {k: form[k] for k in DEFAULT_MODES if k in form}
         if any(v not in MODES for v in new.values()):
