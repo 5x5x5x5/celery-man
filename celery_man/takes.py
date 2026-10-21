@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class TakePlan:
-    need: str  # done | run | judge | edit | limit
+    need: str  # done | run | judge | edit | limit | fallback (past the last round with no usable take: a quick take ships)
     missing: int = 0
     round: int = 0
     prompt: str = ""
@@ -88,7 +88,8 @@ def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | N
         g, r = g + 1, 1
     plan = TakePlan("run", 0, r, prompt, kf, kf_path, gen=g)
     if r > MAX_ROUND:
-        plan.need = "limit"
+        last = [x["key"] for x in cur if x["round"] == MAX_ROUND]
+        plan.need, plan.missing = ("limit", 0) if any(led.done(k) and sheet(p, k) for k in last) else ("fallback", 1)
     elif r > 1 and h in {_h(x["key"]) for x in cur if x["round"] < r}:  # not_rewritten, from paper-machine direct.py
         plan.need = "edit"
     else:
@@ -190,6 +191,27 @@ def _rewrite_rejected(run: Run) -> bool:
     return True
 
 
+def _quick_picks(run: Run, shots: list[Shot], brief: Brief, plans: dict[str, TakePlan], picks: dict) -> None:
+    for sid, key in quick_takes(run, shots, brief, read_json(run.p.keyframes_path)).items():
+        picks[sid] = {"key": key, "clip": f"{run.p.takes_dir.name}/{key}.mp4", "in": IN_POINT, "round": 0, "gen": plans[sid].gen,
+                      "quick": True}  # fmt: skip
+    write_json(run.p.picks_path, picks)
+
+
+def _no_usable_take(run: Run) -> None:
+    """Either mode: a round with no readable take is rejected as unusable (then rewritten or edited, as any rejection);
+    in the last round, or once past it, the shot ships one quick take instead."""
+    brief, shots, picks, plans = _plans(run)
+    dead = [s for s in shots if plans[s.id].need == "judge" and not any(sheet(run.p, k) for k, _ in plans[s.id].keys)]
+    for s in dead:
+        log.error("%s: no usable take in gen %d round %d", s.id, plans[s.id].gen, plans[s.id].round)
+        if plans[s.id].round < MAX_ROUND:
+            picks[s.id] = {"rejected": True, "round": plans[s.id].round, "gen": plans[s.id].gen, "reason": "all takes unusable"}
+            write_json(run.p.picks_path, picks)
+    if last := [s for s in shots if plans[s.id].need == "fallback" or (s in dead and plans[s.id].round >= MAX_ROUND)]:
+        _quick_picks(run, last, brief, plans, picks)
+
+
 def run_takes(run: Run) -> None:
     p = run.p
     auto_mode = p.modes["takes"] == "auto"
@@ -207,20 +229,11 @@ def run_takes(run: Run) -> None:
     reserve = cost(len(fallback) + 1, EST_WALL_S, TAKE_GPU) + (cost(len(fallback), EST_STILL_S, STILL_GPU) if auto_mode else 0.0)
     if jobs and not run.led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU) + reserve):
         # the round won't fit: each unfinished shot gets one quick take, used as is, so the video still ships
-        kfs = read_json(p.keyframes_path)
         log.warning("cap reached: quick takes instead of the round for %s", ", ".join(s.id for s in fallback))
-        for sid, key in quick_takes(run, fallback, brief, kfs).items():
-            picks[sid] = {
-                "key": key,
-                "clip": f"{p.takes_dir.name}/{key}.mp4",
-                "in": IN_POINT,
-                "round": 0,
-                "gen": plans[sid].gen,
-                "quick": True,
-            }
-        write_json(p.picks_path, picks)
+        _quick_picks(run, fallback, brief, plans, picks)
     elif jobs:
         _run_takes(run, jobs)
+    _no_usable_take(run)
     if not auto_mode:
         return
     brief, shots, picks, plans = _plans(run)
@@ -228,10 +241,7 @@ def run_takes(run: Run) -> None:
         pl = plans[s.id]
         if pl.need != "judge":
             continue
-        usable = [(k, sh) for k, _ in pl.keys if (sh := sheet(p, k))]
-        if not usable:
-            log.error("%s: no usable take in gen %d round %d", s.id, pl.gen, pl.round)
-            continue
+        usable = [(k, sh) for k, _ in pl.keys if (sh := sheet(p, k))]  # never empty: _no_usable_take handled those
         idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == MAX_ROUND)
         if idx is None:
             picks[s.id] = {"rejected": True, "gen": pl.gen, "round": pl.round, "reason": why}

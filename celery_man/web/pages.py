@@ -190,7 +190,8 @@ def takes_get(request: Request):
         plan = _plan(p, led, s.id)
         rnd, keys = _choices(led, s.id, plan)
         sheets = [(k, sh.relative_to(p.root) if (sh := sheet(p, k)) else None) for k in keys]
-        rows.append({"s": s, "plan": plan, "round": rnd, "sheets": sheets, "pick": picks.get(s.id), "max_round": MAX_ROUND})
+        rows.append({"s": s, "plan": plan, "round": rnd, "sheets": sheets, "pick": picks.get(s.id), "max_round": MAX_ROUND,
+                     "usable": any(sh for _, sh in sheets)})  # fmt: skip
     return render(request, "takes.html", rows=rows, auto=p.modes["takes"] == "auto")
 
 
@@ -214,8 +215,11 @@ async def takes_reject(request: Request, sid: str):
     p = _p(request)
     _editable(request, "takes")
     reason = (await request.form()).get("reason", "").strip()
-    plan = _plan(p, Ledger(p.ledger_path, p.cap_usd), sid)
-    if plan.need != "judge" or plan.round >= MAX_ROUND or not reason:
+    led = Ledger(p.ledger_path, p.cap_usd)
+    plan = _plan(p, led, sid)
+    # the last round must pick, unless no take in it is readable: then the next run ships a quick take for the shot
+    last_with_usable = plan.round >= MAX_ROUND and any(sheet(p, k) for k in _choices(led, sid, plan)[1])
+    if plan.need != "judge" or last_with_usable or not reason:
         raise HTTPException(400, f"reject all needs a reason, and round {MAX_ROUND} must pick a take")
     picks = read_json(p.picks_path) or {}
     picks[sid] = {"rejected": True, "round": plan.round, "gen": plan.gen, "reason": reason}

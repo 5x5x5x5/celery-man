@@ -106,7 +106,7 @@ def write_shots(chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float,
                 raise ValueError(f"{i}: unknown cast '{x}' (known: {', '.join(sorted(cast))})")
         if p is not None and (not isinstance(p, str) or p not in places):
             raise ValueError(f"{i}: place must be a name or null (known: {', '.join(sorted(places))})")
-        if not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
+        if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
             raise ValueError(f"{i}: action and framing must be non-empty strings")
         shot = Shot(i, w[0], w[1], w[2], d["action"], c, p, d["framing"])
         try:
@@ -186,6 +186,8 @@ def rewrite_shot(chat_fn: ChatFn, shot: Shot, brief: Brief, reason: str) -> Shot
     user = f"Brief: {_brief_text(brief)}\nShot: {_shot_text(shot)}\nWhy it failed: {reason}"
 
     def validate(d) -> Shot:
+        if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
+            raise ValueError(f"shot {shot.id}: action and framing must be non-empty strings")
         new = Shot(shot.id, shot.start, shot.end, shot.section, d["action"], d["cast"], d["place"], d["framing"])
         if not isinstance(new.action, str) or not isinstance(new.framing, str) or not isinstance(new.cast, list):
             raise TypeError("action/framing must be strings and cast a list")

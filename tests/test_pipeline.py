@@ -26,9 +26,10 @@ BRIEF = {
 class CountingGen(FakeGenerator):
     """FakeGenerator that counts jobs, fails clips (only) for chosen shots, and renders one clip it then reuses."""
 
-    def __init__(self, fail_clips=(), junk=()):
+    def __init__(self, fail_clips=(), junk=(), junk_takes=()):
         super().__init__()
         self.fail_clips, self.junk, self.stills_n, self.clips_n, self._clip = set(fail_clips), set(junk), [], [], None
+        self.junk_takes = set(junk_takes)  # shots whose judged takes (seeds >= 1000, not the quick seed) are all junk
 
     def stills(self, jobs):
         self.stills_n += [j.shot_id for j in jobs]
@@ -43,7 +44,7 @@ class CountingGen(FakeGenerator):
             if j.shot_id in self.fail_clips:
                 yield RuntimeError("boom")
                 continue
-            if j.key in self.junk or j.shot_id in self.junk:
+            if j.key in self.junk or j.shot_id in self.junk or (j.shot_id in self.junk_takes and j.seed >= 1000):
                 self.junk.discard(j.shot_id)  # a shot id junks only its first take
                 yield {"mp4": b"not an mp4", "wall_s": 1.0, "gpu": "L4"}
                 continue
@@ -201,6 +202,8 @@ def test_auto_reject_rewrites_then_round_two_must_pick(tmp_path, song):
     assert Ledger(p.ledger_path).rounds("s01") == [1, 2]
     assert read_json(p.picks_path)["s01"]["round"] == 2
     assert gen.stills_n.count("s01") == 2 and gen.clips_n.count("s01") == 6
+    report = (p.out_dir / "report.md").read_text()
+    assert "(round 2, forced)" in report.split("**s01**")[1].split("\n")[0] and "forced" not in report.split("**s02**")[1]
 
 
 def test_round_limit_is_per_shot(tmp_path, song):
@@ -326,3 +329,37 @@ def test_quick_declined_at_the_gate_spends_nothing(tmp_path, song):
     with pytest.raises(Declined):
         quick(p, gen, chat_text=text_chat, confirm=lambda c: seen.append(c) or False)
     assert len(seen) == 1 and seen[0] > 0 and p.shots_path.exists() and gen.stills_n == []
+
+
+def test_all_takes_unusable_rejects_then_falls_back_to_quick(tmp_path, song):
+    p = make(tmp_path, song)
+    gen = CountingGen(junk_takes={"s01"})
+    sts = run_auto(p, gen)
+    assert set(states(sts).values()) == {"done"} and (p.out_dir / "video.mp4").exists()
+    assert p.load_shots()[0].action == "a person stands"  # round 1 was rejected as unusable, then rewritten
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2]
+    pick = read_json(p.picks_path)["s01"]
+    assert pick["quick"] and gen.clips_n.count("s01") == 7  # 2 rounds of 3, then one quick take
+
+
+def test_tastemaker_all_unusable_round_waits_on_an_edit(tmp_path, song):
+    p = make(tmp_path, song, modes=ALL_AUTO | {"takes": "tastemaker"})
+    sts = {s.step: s for s in run_auto(p, CountingGen(junk_takes={"s01"}))}
+    assert read_json(p.picks_path)["s01"] == {"rejected": True, "round": 1, "gen": 1, "reason": "all takes unusable"}
+    assert sts["takes"].state == "waiting" and "s01 edit" in sts["takes"].detail
+
+
+def test_hand_edited_shot_windows_are_stale(tmp_path, song):
+    p = make(tmp_path, song)
+    run_auto(p)
+    d = read_json(p.shots_path)
+    d["shots"][2]["end"] += 0.5
+    write_json(p.shots_path, d)
+    st = {s.step: s for s in status(p)}["shots"]
+    assert st.state == "stale" and "s03" in st.detail
+    write_json(p.root / "project.json", p.config | {"modes": ALL_AUTO | {"shots": "tastemaker"}})
+    st = {s.step: s for s in status(p)}["shots"]
+    assert st.state == "waiting" and "s03" in st.detail
+    del d["shots"][-1]
+    write_json(p.shots_path, d)
+    assert "7 shots" in {s.step: s for s in status(p)}["shots"].detail

@@ -205,7 +205,8 @@ def write_report(p: Project, led: Ledger) -> None:
         takes = [r for r in jobs if r["shot"] == s.id and r.get("model") == TAKE_MODEL]
         g = max((r["gen"] for r in takes), default=0)
         rounds = sorted({r["round"] for r in takes if r["gen"] == g}) or "-"
-        pick = f"`{pk['key']}`" + (" (quick)" if pk.get("quick") else "") if "key" in pk else "none"
+        how = " (quick)" if pk.get("quick") else f" (round {MAX_ROUND}, forced)" if pk.get("round") == MAX_ROUND else ""
+        pick = f"`{pk['key']}`{how}" if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
         lines.append(f"- **{s.id}**: gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
     if fell_back := [s.id for s in shots if picks.get(s.id, {}).get("quick")]:

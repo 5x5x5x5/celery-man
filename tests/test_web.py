@@ -296,3 +296,21 @@ def test_unknown_estimate_runs_to_the_gate_then_shows_it(tmp_path, song):
     assert p.shots_path.exists() and not p.keyframes_path.exists()
     page = c.get("/").text
     assert f"Run (≈${estimate(p):.2f})" in page and estimate(p) > 0
+
+
+def test_round_two_without_usable_takes_can_be_rejected_then_falls_back(tmp_path, song):
+    p = project(tmp_path, song)
+    to_judging(p)
+    c = client(p)
+    c.post("/takes/s01/reject", data={"reason": "morphing"})
+    c.post("/shots", data={"action_s01": "a person stands", "cast_s01": ["A"], "place_s01": "P", "framing_s01": "wide shot"})
+    to_judging(p)
+    for r in Ledger(p.ledger_path).rows():  # every round-2 take turns out unreadable
+        if r.get("model") == "ltx-2.5-draft" and r["round"] == 2:
+            (p.takes_dir / f"{r['key']}.mp4").write_bytes(b"not an mp4")
+            (p.sheets_dir / f"{r['key']}.jpg").unlink(missing_ok=True)
+    assert "disabled" not in c.get("/takes").text
+    assert c.post("/takes/s01/reject", data={"reason": "no usable take"}).status_code == 200
+    assert "quick take" in c.get("/takes").text
+    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 6
+    assert read_json(p.picks_path)["s01"]["quick"]

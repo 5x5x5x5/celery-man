@@ -10,6 +10,8 @@
     <p>Picked <code>{{ pick.key }}</code>{% if pick.quick %} (quick){% endif %}, round {{ pick.round }}.</p>
   {% elif plan.need == "edit" %}
     <p class="error">Rejected: {{ pick.reason }}. <a href="/shots#{{ s.id }}">Rewrite this shot</a>, then run for round {{ plan.round }}.</p>
+  {% elif plan.need == "fallback" %}
+    <p>No usable round-{{ r.max_round }} take; the next run gives this shot one quick take.</p>
   {% elif plan.need == "run" %}
     <p>Takes not made yet; they come with the next run.</p>
   {% else %}
@@ -25,7 +27,7 @@
     </div>
     {% if not (auto or running) and plan.need == "judge" %}
     <form method="post" action="/takes/{{ s.id }}/reject" class="inline">
-      {% set last = r.round >= r.max_round %}
+      {% set last = r.round >= r.max_round and r.usable %}
       <input name="reason" required placeholder="why none works" aria-label="{{ s.id }} reason"{% if last %} disabled{% endif %}>
       <button{% if last %} disabled title="round {{ r.max_round }} must pick a take"{% endif %}>Reject all</button>
     </form>

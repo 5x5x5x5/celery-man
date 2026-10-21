@@ -91,6 +91,17 @@ def _per_shot(p: Project, step: str, needs: dict[str, str], wait_on: set[str], h
     return StepState(step, "stale" if have_file else "missing", detail)
 
 
+def _window_mismatch(p: Project, shots: list[Shot]) -> str:
+    """The first way a (hand-edited) shots.json departs from the planned ids and windows, or ""."""
+    want = [(f"s{i:02d}", a, b) for i, (a, b, _) in enumerate(steps.windows(p), 1)]
+    if len(shots) != len(want):
+        return f"shots.json has {len(shots)} shots, the windows need {len(want)}"
+    for s, (sid, a, b) in zip(shots, want):
+        if (s.id, s.start, s.end) != (sid, a, b):
+            return f"{s.id} is {s.start:.2f}-{s.end:.2f}s, window {sid} is {a:.2f}-{b:.2f}s"
+    return ""
+
+
 def status(p: Project) -> list[StepState]:
     timing, brief_d = read_json(p.timing_path), read_json(p.brief_path)
     out = [StepState("timing", "missing" if timing is None else "done" if timing["song_sha"] == steps.song_sha(p) else "stale")]
@@ -98,8 +109,10 @@ def status(p: Project) -> list[StepState]:
     shots_d = read_json(p.shots_path)
     brief = p.load_brief()
     fresh = None if shots_d is None or brief is None or timing is None else shots_d["inputs"] == steps.shots_inputs(p, brief)
-    out.append(_decision(p, "shots", fresh))
     shots = p.load_shots()
+    mismatch = _window_mismatch(p, shots) if fresh else ""
+    out.append(_decision(p, "shots", fresh and not mismatch))
+    out[-1].detail = mismatch or out[-1].detail
     if brief is None or not shots:
         return out + [StepState(s, "missing") for s in STEPS[3:]]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)

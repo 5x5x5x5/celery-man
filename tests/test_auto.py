@@ -159,3 +159,15 @@ def test_write_brief_is_lenient_and_strict_feedback():
     chat = stub(json.dumps(sloppy | {"avoid": 5}), json.dumps(sloppy))
     write_brief(chat, "")
     assert "avoid (a list of strings): expected list, got int" in chat.calls[1][1]
+
+
+def test_rewrite_shot_rejects_empty_action_or_framing():
+    from celery_man.auto import rewrite_shot
+    from celery_man.project import Shot
+
+    shot = Shot("s01", 0.0, 4.0, "x", "a person walks", ["A"], "P", "wide shot")
+    empty = json.dumps({"action": "", "cast": ["A"], "place": "P", "framing": "wide shot"})
+    good = json.dumps({"action": "a person stands", "cast": ["A"], "place": "P", "framing": "wide shot"})
+    chat = stub(empty, json.dumps({"action": "a person stands", "cast": ["A"], "place": "P", "framing": ""}), good)
+    assert rewrite_shot(chat, shot, brief(), "morphing").action == "a person stands"
+    assert "non-empty" in chat.calls[1][1] and "non-empty" in chat.calls[2][1]
