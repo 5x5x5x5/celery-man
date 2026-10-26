@@ -49,19 +49,23 @@ ANIMATOR_GPU = "L4"  # smallest card that works with group offload: 960x544 draf
 ANIMATOR_MEMORY_GIB = 88  # CPU RAM holds the offloaded weights (77 GiB peak measured); Modal bills $0.008/GiB/h
 
 DIFFUSERS_SHA = "b800f828f3951c4d206e154411bcbfa693cd322e"  # huggingface/diffusers main on 2026-10-17; LTX-2.5 is not in a release
-image = modal.Image.debian_slim(python_version="3.12").pip_install(
-    "torch",
-    "transformers",
-    "accelerate",
-    "sentencepiece",
-    "av",  # diffusers encode_video and LTX-2.5 image CRF re-compression use PyAV
-    "imageio[ffmpeg]",
+# newest PyPI releases on 2026-10-17 (uv pip compile --exclude-newer 2026-10-18), so a rebuild matches the measured image
+image = modal.Image.debian_slim(python_version="3.12").uv_pip_install(
+    "torch==2.14.1",
+    "transformers==5.20.1",
+    "accelerate==1.15.0",
+    "huggingface-hub==2.2.0",
+    "sentencepiece==0.2.2",
+    "av==19.0.1",  # diffusers encode_video and LTX-2.5 image CRF re-compression use PyAV
+    "imageio[ffmpeg]==2.38.1",
     f"diffusers @ https://github.com/huggingface/diffusers/archive/{DIFFUSERS_SHA}.zip",
 )
 app = modal.App("celery-man", image=image)
 weights = modal.Volume.from_name("celery-man-weights", create_if_missing=True)
 hf = modal.Secret.from_name("huggingface")
 log = logging.getLogger(__name__)
+if not modal.is_local():  # containers start with the root logger at WARNING; local entrypoints configure their own
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 @app.function(secrets=[hf])
@@ -85,10 +89,12 @@ def download_weights() -> None:
 
     for repo, patterns in ((FLUX, FLUX_PATTERNS), (LTX, LTX_PATTERNS)):
         dest = Path("/weights") / repo
-        if (dest / "model_index.json").exists():
+        done = dest / ".complete"  # model_index.json can land before the shards, so only this marks a finished download
+        if done.exists():
             log.info("%s already present", repo)
             continue
-        snapshot_download(repo, local_dir=dest, allow_patterns=patterns)
+        snapshot_download(repo, local_dir=dest, allow_patterns=patterns)  # resumes, skipping files already fetched
+        done.touch()
         weights.commit()
 
 
