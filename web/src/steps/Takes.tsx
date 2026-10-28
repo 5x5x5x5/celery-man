@@ -34,6 +34,9 @@ export function TakeCard({ src, start, window: win, inPoint, onIn, children }: {
   );
 }
 
+export const roundLabel = (t: { landed_round: number; cap: number | null }): string =>
+  t.landed_round === 0 ? "no rounds yet" : t.cap === null ? `round ${t.landed_round}` : `round ${t.landed_round} of ${t.cap}`;
+
 const running = (s: ShotState, busy: boolean, names: string[]) => busy && (s.takes?.need === "run" || names.some((n) => n.includes(s.shot.id)));
 
 export function Takes({ state, refresh, initial }: { state: State; refresh: () => void; initial?: string | null }) {
@@ -91,14 +94,12 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
 
   const t = cur?.takes;
   const win = cur ? cur.shot.end - cur.shot.start : 0;
-  // `round` is the one to generate next once a round is rejected or running; otherwise it is the round of the landed takes.
-  const lastRound = t ? (t.need === "run" || t.pick?.rejected ? t.round - 1 : t.round) : 0;
-  const counter = !t?.takes.length ? "no rounds yet" : t.cap === null ? `round ${lastRound}` : `round ${lastRound} of ${t.cap}`;
+  const counter = t ? roundLabel(t) : "";
   const nextRound = (
     <PricedButton
       label="Next round"
       price={prices.take_round}
-      disabledReason={t && t.cap !== null && t.round > t.cap ? "round cap reached" : undefined}
+      disabledReason={t?.need === "limit" ? "round cap reached" : undefined}
       onConfirm={async (shown) => {
         const r = await continueRun(pid, shown, [sid]);
         refresh();

@@ -44,7 +44,7 @@ def _takes(p: Project, led: Ledger, rows: list[dict], s: Shot, brief: Brief, kf:
     latest = max(((r["gen"], r["round"]) for r in landed.values()), default=None)
     shown = [{"key": k, "clip": f"takes/{k}.mp4", "sheet": f"sheets/{k}.jpg" if (p.sheets_dir / f"{k}.jpg").exists() else None, "seed": r["seed"]}
              for k, r in landed.items() if (r["gen"], r["round"]) == latest]  # fmt: skip
-    return {"need": plan.need, "round": plan.round, "cap": takes.round_cap(p, s.id), "takes": shown, "pick": pick,
+    return {"need": plan.need, "round": plan.round, "landed_round": latest[1] if latest else 0, "cap": takes.round_cap(p, s.id), "takes": shown, "pick": pick,
             "changed_since_upload": changed_since_upload(p, s, brief, pick)}  # fmt: skip
 
 

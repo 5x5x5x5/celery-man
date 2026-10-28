@@ -82,8 +82,10 @@ export interface ShotTake {
 }
 export interface ShotTakes {
   need: "done" | "run" | "judge" | "edit" | "limit" | "fallback";
-  /** The NEXT round to generate. Not the round of `takes`. */
+  /** take_plan's round: the landed round on resume/judge, the NEXT round only right after a rejection. Use `landed_round` for display. */
   round: number;
+  /** The round of `takes` (0 when none have landed). */
+  landed_round: number;
   cap: number | null;
   /** The clips of the latest LANDED round, the ones a pick is made from. */
   takes: ShotTake[];

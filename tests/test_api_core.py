@@ -262,3 +262,25 @@ def test_front_end_served_or_503(tmp_path, song, monkeypatch):
     assert c.get("/").text == "<p>app</p>" and c.get("/assets/a.js").text == "1"
     assert c.get("/assets/%2E%2E/%2E%2E/solo/project.json").status_code == 404
     assert c.get("/api/nothing").status_code == 404
+
+
+def test_state_landed_round_after_reject_and_next_round(tmp_path, song):
+    p = decided(tmp_path, song)
+    advance(p, FakeGenerator())
+    write_json(p.keyframes_path, {k: v | {"approved": True} for k, v in read_json(p.keyframes_path).items()})
+    advance(p, FakeGenerator())
+    c = client(p.root)
+    t = c.get("/api/projects/proj/state").json()["shots"][0]["takes"]
+    assert t["landed_round"] == 1 and len(t["takes"]) == 3
+    picks = {s.id: {"rejected": True, "round": 1, "gen": 1, "reason": "no"} for s in p.load_shots()}
+    write_json(p.picks_path, picks)
+    t = c.get("/api/projects/proj/state").json()["shots"][0]["takes"]
+    assert t["round"] == 2 and t["landed_round"] == 1  # next round to generate vs the round on screen
+    d = read_json(p.shots_path)
+    d["shots"][0]["action"] = "a person sits"  # an unchanged prompt may not repeat a rejected round
+    write_json(p.shots_path, d)
+    advance(p, FakeGenerator())
+    write_json(p.keyframes_path, {k: v | {"approved": True} for k, v in read_json(p.keyframes_path).items()})
+    advance(p, FakeGenerator())
+    t = c.get("/api/projects/proj/state").json()["shots"][0]["takes"]
+    assert t["landed_round"] == 2 and len(t["takes"]) == 3 and t["pick"]["rejected"] is True  # the stale rejection stays
