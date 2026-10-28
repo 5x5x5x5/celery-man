@@ -1,5 +1,5 @@
-import re
 import json
+import re
 import threading
 
 from fastapi.testclient import TestClient
