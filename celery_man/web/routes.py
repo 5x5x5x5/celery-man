@@ -5,18 +5,20 @@ from collections.abc import Callable
 from dataclasses import asdict
 
 from fastapi import APIRouter, Form, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.routing import APIRoute
 
-from celery_man import auto, suggest, uploads
+from celery_man import auto, features, suggest, templates, uploads
 from celery_man.assemble import probe_duration
 from celery_man.compose import compose
+from celery_man.generate import FPS
 from celery_man.ledger import Ledger
 from celery_man.pipeline import advance
 from celery_man.project import Project, Shot, brief_from_dict, read_json, shot_from_dict, update_json
 from celery_man.spend import OverReserve, PriceChanged, check, prices
 from celery_man.steps import Run, brief_inputs, merge_entry, run_assemble, shots_inputs
 from celery_man.takes import take_plan
+from celery_man.web.preview import preview_html
 
 log = logging.getLogger(__name__)
 IDEAS_PER_WINDOW = 3
@@ -123,6 +125,27 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
             fn()
 
         return queued(j.paid(name, go))
+
+    @r.get("/preview")
+    def preview(pid: str, sid: str, candidate: str | None = None) -> HTMLResponse:
+        p, _ = get(pid)
+        shot, code = _shot(p, sid), None
+        if candidate is not None:
+            items = (read_json(p.root / "candidates" / "shots" / f"{sid}.json") or {}).get("items", [])
+            item = next((i for i in items if i["id"] == candidate), None)
+            if item is None:
+                raise LookupError(f"no candidate {candidate} for {sid}")
+            shot, code = shot_from_dict(item["shot"]), item.get("code")
+        if not shot.scene:
+            raise ValueError(f"{sid}: this is not an animation shot")
+        if code is None:
+            code = templates.source(shot.scene["template"]) if "template" in shot.scene else (p.root / shot.scene["file"]).read_text()
+        return HTMLResponse(preview_html(code, shot.scene["params"], _brief(p).look, 1))
+
+    @r.get("/frames")
+    def frames(pid: str, start: float, end: float) -> list[dict]:
+        p, _ = get(pid)
+        return features.frame_data(read_json(p.timing_path), features.ensure(p), start, end, FPS)
 
     @r.put("/brief")
     async def put_brief(pid: str, request: Request) -> dict:
