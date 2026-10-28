@@ -5,6 +5,7 @@ import time
 from fastapi.testclient import TestClient
 
 from celery_man import steps
+from celery_man.compose import compose
 from celery_man.generate import FakeGenerator
 from celery_man.pipeline import advance, run_busy, run_lock
 from celery_man.project import DEFAULT_MODES, Project, Shot, brief_from_dict, read_json, write_json
@@ -228,6 +229,7 @@ def test_state_per_shot_needs(tmp_path, song):
     assert s01["modes"] == {"shots": "tastemaker", "keyframes": "tastemaker", "takes": "tastemaker"} and s01["render"] is None
     assert s01["keyframe"]["need"] == "done" and s01["keyframe"]["entry"]["approved"] is True
     assert s01["keyframe"]["changed_since_upload"] is False
+    assert s01["keyframe"]["prompt"] == compose(Shot(**s01["shot"]), brief_from_dict(BRIEF)) and s01["keyframe"]["prompt_error"] == ""
     t = s01["takes"]
     assert t["need"] == "judge" and t["round"] == 1 and t["cap"] is None and t["pick"] is None and len(t["takes"]) == 3
     assert all(x["sheet"].startswith("sheets/") and x["clip"].startswith("takes/") and x["seed"] for x in t["takes"])

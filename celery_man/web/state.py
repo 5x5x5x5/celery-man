@@ -4,6 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from celery_man import takes
+from celery_man.compose import PromptTooLong, compose
 from celery_man.cut import cut_plan
 from celery_man.ledger import Ledger
 from celery_man.pipeline import status
@@ -69,7 +70,18 @@ def _shot(p: Project, s: Shot, brief: Brief | None, led: Ledger, rows: list[dict
         return out
     kf, pick = kfs.get(s.id), picks.get(s.id)
     need = "done" if (pick or {}).get("uploaded") else kf_need(p, s, brief, kf)  # as status() counts an uploaded take
-    out["keyframe"] = {"need": need, "entry": kf, "changed_since_upload": changed_since_upload(p, s, brief, kf)}
+    prompt, error = "", ""
+    try:
+        prompt = compose(s, brief)
+    except PromptTooLong as e:
+        error = str(e)
+    out["keyframe"] = {
+        "need": need,
+        "entry": kf,
+        "changed_since_upload": changed_since_upload(p, s, brief, kf),
+        "prompt": prompt,
+        "prompt_error": error,
+    }
     out["takes"] = _takes(p, led, rows, s, brief, kf, pick)
     return out
 

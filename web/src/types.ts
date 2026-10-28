@@ -95,7 +95,7 @@ export interface ShotState {
   open: boolean;
   modes: Record<"shots" | "keyframes" | "takes", Mode>;
   render: { need: "gen" | "failed" | "done"; clip: string | null; poster: string | null; error: string | null } | null;
-  keyframe: { need: "gen" | "judge" | "done"; entry: KeyframeEntry | null; changed_since_upload: boolean } | null;
+  keyframe: { need: "gen" | "judge" | "done"; entry: KeyframeEntry | null; changed_since_upload: boolean; prompt: string; prompt_error: string } | null;
   takes: ShotTakes | null;
 }
 

@@ -53,6 +53,7 @@ export function Keyframes({ state, refresh, initial }: { state: State; refresh: 
     setSel(id);
     setEditing(false);
     setRejecting(null);
+    setUploadError("");
     playWindow(s.start, s.end, true);
   };
   const setView = (v: View) =>
@@ -81,9 +82,8 @@ export function Keyframes({ state, refresh, initial }: { state: State; refresh: 
           <ModeSwitch value={view} onChange={setView} />
           {kf.changed_since_upload && <p className="error" role="alert">The shot changed since this still was uploaded. Keep it or replace it.</p>}
           <p>
-            {/* The composed prompt is built server-side and is not in the state, so this shows the shot it is derived from. */}
-            <span className="muted">Prompt comes from the shot: </span>
-            {shot.action}, {shot.framing}{shot.cast.length ? `, ${shot.cast.join(", ")}` : ""}{shot.place ? `, ${shot.place}` : ""}{" "}
+            <span className="muted">Prompt (from the shot): </span>
+            {kf.prompt_error ? <span className="error">{kf.prompt_error}</span> : <span>{kf.prompt}</span>}{" "}
             <button onClick={() => setEditing(!editing)}>Edit shot</button>
           </p>
           {editing && (

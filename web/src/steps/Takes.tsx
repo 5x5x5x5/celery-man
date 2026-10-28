@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { continueRun, fileUrl, pickTake, putShotModes, rejectTakes, uploadTake } from "../api";
-import { playWindow } from "../clock";
+import { playWindow, useSongTime } from "../clock";
 import { InPoint } from "../InPoint";
 import { apiMode, loadView, ModeSwitch, saveView } from "../ModeSwitch";
 import type { View } from "../ModeSwitch";
@@ -10,9 +10,10 @@ import { ShotStrip } from "../ShotStrip";
 import { Upload } from "../Upload";
 import type { ShotState, ShotTake, State } from "../types";
 
-/** Loops the clip over [inPoint, inPoint + window) with the in-point handle under it. */
-function TakeCard({ src, window: win, inPoint, onIn, children }: {
+/** Shows the clip at in + (t - start) while the song plays inside the shot's window, so it stays on the song. */
+export function TakeCard({ src, start, window: win, inPoint, onIn, children }: {
   src: string;
+  start: number;
   window: number;
   inPoint: number;
   onIn: (v: number) => void;
@@ -20,26 +21,13 @@ function TakeCard({ src, window: win, inPoint, onIn, children }: {
 }) {
   const v = useRef<HTMLVideoElement>(null);
   const [dur, setDur] = useState(0);
+  const t = useSongTime();
   useEffect(() => {
-    if (v.current && dur) v.current.currentTime = inPoint;
-  }, [inPoint, dur]);
+    if (v.current && dur) v.current.currentTime = inPoint + (t >= start && t < start + win ? t - start : 0);
+  }, [t, inPoint, dur, start, win]);
   return (
     <article className="card takecard">
-      <video
-        ref={v}
-        src={src}
-        muted
-        autoPlay
-        onLoadedMetadata={(e) => setDur(e.currentTarget.duration)}
-        onTimeUpdate={(e) => {
-          const el = e.currentTarget;
-          if (el.currentTime >= inPoint + win || el.ended) el.currentTime = inPoint;
-        }}
-        onEnded={(e) => {
-          e.currentTarget.currentTime = inPoint;
-          void e.currentTarget.play();
-        }}
-      />
+      <video ref={v} src={src} muted preload="auto" onLoadedMetadata={(e) => setDur(e.currentTarget.duration)} />
       {dur > 0 && <InPoint clipDuration={dur} window={win} value={inPoint} onChange={onIn} />}
       {children}
     </article>
@@ -82,6 +70,7 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
     setSel(id);
     setReason(null);
     setEditing(false);
+    setUploadError("");
     playWindow(s.start, s.end, true);
   };
   const setView = (v: View) =>
@@ -102,8 +91,9 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
 
   const t = cur?.takes;
   const win = cur ? cur.shot.end - cur.shot.start : 0;
-  const lastRound = t ? (t.takes.length ? t.round - 1 : t.round) : 0;
-  const counter = t ? (t.cap === null ? `round ${lastRound}` : `round ${lastRound} of ${t.cap}`) : "";
+  // `round` is the one to generate next once a round is rejected or running; otherwise it is the round of the landed takes.
+  const lastRound = t ? (t.need === "run" || t.pick?.rejected ? t.round - 1 : t.round) : 0;
+  const counter = !t?.takes.length ? "no rounds yet" : t.cap === null ? `round ${lastRound}` : `round ${lastRound} of ${t.cap}`;
   const nextRound = (
     <PricedButton
       label="Next round"
@@ -135,7 +125,7 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
             <>
               <div className="cards">
                 {t.takes.map((k: ShotTake) => (
-                  <TakeCard key={k.key} src={fileUrl(pid, k.clip)} window={win} inPoint={ins[k.key] ?? 0} onIn={(v) => setIns((m) => ({ ...m, [k.key]: v }))}>
+                  <TakeCard key={k.key} src={fileUrl(pid, k.clip)} start={cur.shot.start} window={win} inPoint={ins[k.key] ?? 0} onIn={(v) => setIns((m) => ({ ...m, [k.key]: v }))}>
                     <div className="row">
                       <button className="primary" onClick={() => guard(() => pickTake(pid, sid, k.key, ins[k.key] ?? 0))}>
                         {t.pick?.key === k.key ? "Chosen" : "Use"}
