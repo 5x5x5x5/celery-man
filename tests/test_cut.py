@@ -4,11 +4,11 @@ from celery_man import features
 from celery_man.assemble import card_clip, probe_duration
 from celery_man.cut import cut_plan
 from celery_man.generate import FakeGenerator
-from celery_man.pipeline import status
+from celery_man.pipeline import advance, status
 from celery_man.project import DEFAULT_LOOK, Shot, read_json, update_json, write_json
 from celery_man.renders import render_key
 from celery_man.steps import Run, kf_need, run_assemble, windows
-from tests.test_pipeline import make, run_auto
+from tests.test_pipeline import ALL_AUTO, make, run_auto
 
 
 def mixed(tmp_path, song):
@@ -88,3 +88,27 @@ def test_stale_pick_falls_back_to_still(tmp_path, song):
     )
     assert kf_need(p, p.load_shots()[0], brief, read_json(p.keyframes_path)["s01"]) == "done"
     assert cut_plan(p)[0]["kind"] == "still"
+
+
+def test_advance_assembles_past_a_per_shot_wait(tmp_path, song):
+    p = make(tmp_path, song)
+    run_auto(p)
+    (p.out_dir / "video.mp4").unlink()
+    write_json(p.root / "project.json", p.config | {"modes": ALL_AUTO | {"shots": "tastemaker"}})
+    update_json(
+        p,
+        p.shots_path,
+        lambda d: (
+            d | {"shots": [*d["shots"][:-1], {**d["shots"][-1], "kind": "open", "action": "", "cast": [], "place": None, "framing": ""}]}
+        ),
+    )
+    sts = advance(p, FakeGenerator())
+    assert {s.step: s.state for s in sts}["shots"] == "waiting"
+    assert (p.out_dir / "video.mp4").exists() and "## Filled windows" in (p.out_dir / "report.md").read_text()
+
+
+def test_advance_does_not_assemble_past_a_whole_step_wait(tmp_path, song):
+    p = make(tmp_path, song, ALL_AUTO | {"brief": "tastemaker"})
+    sts = advance(p, FakeGenerator())
+    assert {s.step: s.state for s in sts}["brief"] == "waiting"
+    assert not (p.out_dir / "video.mp4").exists()
