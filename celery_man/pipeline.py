@@ -70,11 +70,13 @@ def held_run_lock(p: Project) -> Iterator[None]:
     """run_lock for the web's paid worker: the job inside may call advance or quick, which take run_lock again."""
     with run_lock(p):
         roots, key = _held.__dict__.setdefault("roots", set()), p.root.resolve()
+        added = key not in roots  # nested: the outer holder's marker stays until the outer call ends
         roots.add(key)
         try:
             yield
         finally:
-            roots.discard(key)
+            if added:
+                roots.discard(key)
 
 
 def run_busy(p: Project) -> bool:
@@ -274,7 +276,7 @@ def advance(
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
                 checked = True
-                if confirm and not confirm(est := estimate(p)):
+                if confirm and not confirm(est := estimate(p, only)):
                     log.info("advance: stopped before spending ($%.2f declined)", est)
                     return status(p)
                 _preflight(p, run.led, quick_cost(p))

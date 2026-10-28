@@ -17,6 +17,7 @@ from celery_man.project import DEFAULT_MODES, KINDS, OPEN, Project, read_json, u
 from celery_man.steps import Run, ensure_open_shots, run_timing
 from celery_man.timing import TimingError, plan_windows
 from celery_man.web.jobs import Jobs
+from celery_man.web.routes import make_router
 from celery_man.web.state import PER_SHOT, project_state
 
 log = logging.getLogger(__name__)
@@ -198,6 +199,8 @@ def create_app(root: Path, gen_factory: Callable, chat_factory: Callable) -> Fas
 
         update_json(p, p.root / "project.json", put)
         return {}
+
+    app.include_router(make_router(get, gen_factory, chat_factory))
 
     @app.get("/api/projects/{pid}/files/{path:path}")
     def files(pid: str, path: str):
