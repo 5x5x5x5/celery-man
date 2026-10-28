@@ -98,7 +98,9 @@ def merge_entry(p: Project, path: Path, sid: str, entry: dict) -> None:
 
 
 def kf_need(p: Project, shot: Shot, brief: Brief, entry: dict | None) -> str:
-    """ "gen" (missing, stale or rejected), "judge" (approval pending) or "done"."""
+    """ "gen" (missing, stale or rejected), "judge" (approval pending) or "done". An uploaded keyframe stays done when the prompt moves."""
+    if entry and entry.get("uploaded") and (p.root / entry["path"]).exists():
+        return "done"
     if not entry or entry["prompt_sha"] != prompt_sha(shot, brief) or entry["approved"] is False or not (p.root / entry["path"]).exists():
         return "gen"
     return "done" if entry["approved"] else "judge"
@@ -235,6 +237,8 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
 def run_keyframes(run: Run) -> None:
     p = run.p
     brief, shots, kfs = p.load_brief(), run.wanted(p.load_footage()), read_json(p.keyframes_path) or {}
+    picks = read_json(p.picks_path) or {}
+    shots = [s for s in shots if not (picks.get(s.id) or {}).get("uploaded")]  # an uploaded take needs no keyframe
     auto_shots = [s for s in shots if p.mode("keyframes", s.id) == "auto"]
     vision = run.chat("keyframes", "vision") if any(kf_need(p, s, brief, kfs.get(s.id)) != "done" for s in auto_shots) else None
     regen = [(s, kfs[s.id]["seed"] + 1 if s.id in kfs else 1) for s in shots if kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
@@ -299,6 +303,14 @@ def write_report(p: Project, led: Ledger) -> None:
     (p.out_dir / "report.md").write_text("\n".join(lines))
 
 
+def _uploads_line(p: Project) -> str:
+    kf, pk = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}
+    keys = sorted(k for k, e in kf.items() if e.get("uploaded"))
+    clips = sorted(k for k, e in pk.items() if e.get("uploaded"))
+    parts = [f"{what} for {', '.join(ids)}" for what, ids in (("keyframes", keys), ("takes", clips)) if ids]
+    return f"- Supplied by the tastemaker: {'; '.join(parts)}\n" if parts else ""
+
+
 def write_provenance(p: Project) -> None:
     from celery_man.gen_modal import DIFFUSERS_SHA, FLUX, LTX
 
@@ -311,5 +323,6 @@ def write_provenance(p: Project) -> None:
         f"- Clips: `{LTX}`, LTX-2.x Community License.\n"
         f"- Keyframes: `{FLUX}`, Apache-2.0.\n"
         f"- Song: {p.config['song_source']}\n"
+        f"{_uploads_line(p)}"
         f"- diffusers commit: `{DIFFUSERS_SHA}`\n" + fonts
     )

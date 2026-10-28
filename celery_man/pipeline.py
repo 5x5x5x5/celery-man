@@ -130,7 +130,7 @@ def status(p: Project, only: set[str] | None = None) -> list[StepState]:
     out.append(_render(p, brief, mine))
     footage = [s for s in mine if s.kind == "footage"]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
-    kf_needs = {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in footage}
+    kf_needs = {s.id: "done" if (picks.get(s.id) or {}).get("uploaded") else steps.kf_need(p, s, brief, kfs.get(s.id)) for s in footage}
     out.append(_per_shot(p, "keyframes", kf_needs, {"judge"}, bool(kfs)))
     needs = {
         s.id: "keyframe"
@@ -157,7 +157,7 @@ def estimate(p: Project, only: set[str] | None = None) -> float:
         return 0.0
     shots = [s for s in shots if only is None or s.id in only]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
-    n_kf = sum(steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" for s in shots)
+    n_kf = sum(steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" and not (picks.get(s.id) or {}).get("uploaded") for s in shots)
     n_takes = sum(takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing for s in shots)
     return cost(n_kf, steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 

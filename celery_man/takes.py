@@ -55,9 +55,11 @@ def _h(key: str) -> str:
     return key.rsplit("-", 1)[1]  # the prompt+keyframe hash part of a job key; seeds differ per round
 
 
-def pick_ok(led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
+def pick_ok(p: Project, led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
     if not pick or pick.get("rejected"):
         return False
+    if pick.get("uploaded"):
+        return (p.root / pick["clip"]).is_file()  # pinned: no ledger row, whatever the prompt says now
     row = led.done(pick["key"])
     return bool(row) and row["prompt"] == prompt and Path(row["keyframe"]).is_file() and Path(row["keyframe"]).read_bytes() == kf
 
@@ -75,11 +77,13 @@ def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | N
       round 2 with an unchanged hash is "edit" (not_rewritten), past round 2 is "limit";
     - otherwise the shot changed (brief, shot or keyframe edit) without a rejection: a fresh gen at round 1.
     """
+    if pick and pick.get("uploaded") and pick_ok(p, led, pick, "", b""):
+        return TakePlan("done")
     if kf_need(p, shot, brief, entry) != "done":
         return TakePlan("run", missing=len(SEEDS))
     prompt, kf_path = compose(shot, brief), p.root / entry["path"]
     kf = kf_path.read_bytes()
-    if pick_ok(led, pick, prompt, kf):
+    if pick_ok(p, led, pick, prompt, kf):
         return TakePlan("done")
     rows = [r for r in led.rows() if r.get("kind") == "job" and r.get("shot") == shot.id and r.get("model") == TAKE_MODEL]
     h = _h(job_key(shot.id, 0, prompt, kf))
