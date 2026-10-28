@@ -4,3 +4,4 @@ __pycache__/
 projects/
 smoke/
 celery_man/web/dist/
+web/node_modules/
