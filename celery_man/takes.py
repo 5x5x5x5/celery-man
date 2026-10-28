@@ -62,6 +62,11 @@ def pick_ok(led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
     return bool(row) and row["prompt"] == prompt and Path(row["keyframe"]).is_file() and Path(row["keyframe"]).read_bytes() == kf
 
 
+def round_cap(p: Project, sid: str) -> int | None:
+    """Auto shots stop at MAX_ROUND; a tastemaker decides when to stop paying for rounds."""
+    return MAX_ROUND if p.mode("takes", sid) == "auto" else None
+
+
 def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | None, pick: dict | None) -> TakePlan:
     """Next takes for a shot. The 2-round cap is per pick lineage ("gen", R5), read from the current gen's take rows:
 
@@ -88,8 +93,9 @@ def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | N
     elif cur and not same:
         g, r = g + 1, 1
     plan = TakePlan("run", 0, r, prompt, kf, kf_path, gen=g)
-    if r > MAX_ROUND:
-        last = [x["key"] for x in cur if x["round"] == MAX_ROUND]
+    cap = round_cap(p, shot.id)
+    if cap and r > cap:
+        last = [x["key"] for x in cur if x["round"] == cap]
         plan.need, plan.missing = ("limit", 0) if any(led.done(k) and sheet(p, k) for k in last) else ("fallback", 1)
     elif r > 1 and h in {_h(x["key"]) for x in cur if x["round"] < r}:  # not_rewritten, from paper-machine direct.py
         plan.need = "edit"
@@ -211,10 +217,13 @@ def _no_usable_take(run: Run) -> None:
     dead = [s for s in shots if plans[s.id].need == "judge" and not any(sheet(run.p, k) for k, _ in plans[s.id].keys)]
     for s in dead:
         log.error("%s: no usable take in gen %d round %d", s.id, plans[s.id].gen, plans[s.id].round)
-        if plans[s.id].round < MAX_ROUND:
+        cap = round_cap(run.p, s.id)
+        if cap is None or plans[s.id].round < cap:
             picks[s.id] = {"rejected": True, "round": plans[s.id].round, "gen": plans[s.id].gen, "reason": "all takes unusable"}
             merge_entry(run.p, run.p.picks_path, s.id, picks[s.id])
-    if last := [s for s in shots if plans[s.id].need == "fallback" or (s in dead and plans[s.id].round >= MAX_ROUND)]:
+    if last := [
+        s for s in shots if plans[s.id].need == "fallback" or (s in dead and (cap := round_cap(run.p, s.id)) and plans[s.id].round >= cap)
+    ]:
         _quick_picks(run, last, brief, plans, picks)
 
 
@@ -246,7 +255,7 @@ def run_takes(run: Run) -> None:
         if pl.need != "judge" or s.id not in auto_ids:
             continue
         usable = [(k, sh) for k, _ in pl.keys if (sh := sheet(p, k))]  # never empty: _no_usable_take handled those
-        idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == MAX_ROUND)
+        idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == round_cap(p, s.id))
         if idx is None:
             picks[s.id] = {"rejected": True, "gen": pl.gen, "round": pl.round, "reason": why}
         else:

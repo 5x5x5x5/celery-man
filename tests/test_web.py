@@ -298,7 +298,7 @@ def test_unknown_estimate_runs_to_the_gate_then_shows_it(tmp_path, song):
     assert f"Run (≈${estimate(p):.2f})" in page and estimate(p) > 0
 
 
-def test_round_two_without_usable_takes_can_be_rejected_then_falls_back(tmp_path, song):
+def test_round_two_without_usable_takes_can_be_rejected_then_round_three(tmp_path, song):
     p = project(tmp_path, song)
     to_judging(p)
     c = client(p)
@@ -311,9 +311,8 @@ def test_round_two_without_usable_takes_can_be_rejected_then_falls_back(tmp_path
             (p.sheets_dir / f"{r['key']}.jpg").unlink(missing_ok=True)
     assert "disabled" not in c.get("/takes").text
     assert c.post("/takes/s01/reject", data={"reason": "no usable take"}).status_code == 200
-    assert "quick take" in c.get("/takes").text
-    assert [s.state for s in advance(p, FakeGenerator())] == ["done"] * 7
-    assert read_json(p.picks_path)["s01"]["quick"]
+    assert "run for round 3" in c.get("/takes").text  # a tastemaker shot has no round cap, so no quick fallback
+    assert not read_json(p.picks_path)["s01"].get("quick")
 
 
 # --- animation: look, kinds, scenes ----------------------------------------------------------------

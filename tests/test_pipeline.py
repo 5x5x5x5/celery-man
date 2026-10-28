@@ -470,3 +470,45 @@ def test_takes_wait_on_a_pending_tastemaker_keyframe(tmp_path, song):
     assert read_json(p.keyframes_path)["s01"]["approved"] is None
     st = status_of(p, "takes")
     assert st.state == "waiting" and "s01 keyframe" in st.detail
+
+
+# --- round cap: auto stops at 2, a tastemaker does not -------------------------------------------------
+
+
+def _rejected_twice_then_edited(tmp_path, song, takes_mode):
+    """s01 has rounds 1 and 2 in the ledger, round 2 rejected; the shot is then edited and the pipeline advanced."""
+    p = make(tmp_path, song)
+    run_auto(p, reject={"s01"})
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2]
+    write_json(p.picks_path, read_json(p.picks_path) | {"s01": {"rejected": True, "gen": 1, "round": 2, "reason": "bad"}})
+    write_json(p.root / "project.json", p.config | {"modes": ALL_AUTO | {"takes": takes_mode}})
+    d = read_json(p.shots_path)
+    d["shots"][0]["action"] = "a person sits"
+    write_json(p.shots_path, d)
+    return p, run_auto(p)
+
+
+def test_tastemaker_round_three_runs(tmp_path, song):
+    p, _ = _rejected_twice_then_edited(tmp_path, song, "tastemaker")
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2, 3]
+
+
+def test_auto_round_three_is_limit(tmp_path, song):
+    p, sts = _rejected_twice_then_edited(tmp_path, song, "auto")
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and status_of_sts(sts, "takes").detail == "s01: pick a round-2 take"
+
+
+def status_of_sts(sts, step):
+    return {s.step: s for s in sts}[step]
+
+
+def test_unusable_round_two_tastemaker_rejected_not_quick(tmp_path, song):
+    p = make(tmp_path, song, ALL_AUTO | {"takes": "tastemaker"})
+    gen = CountingGen(junk_takes={"s01"})
+    run_auto(p, gen)
+    d = read_json(p.shots_path)
+    d["shots"][0]["action"] = "a person sits"
+    write_json(p.shots_path, d)
+    run_auto(p, gen)
+    pick = read_json(p.picks_path)["s01"]
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and pick["rejected"] is True and pick["round"] == 2 and not pick.get("quick")
