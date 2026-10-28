@@ -150,11 +150,12 @@ def status(p: Project, only: set[str] | None = None) -> list[StepState]:
     return out
 
 
-def estimate(p: Project) -> float:
+def estimate(p: Project, only: set[str] | None = None) -> float:
     """USD for the keyframes and takes advance would generate now (shots awaiting a rewrite are not counted)."""
     brief, shots = p.load_brief(), p.load_footage()
     if brief is None or not shots:
         return 0.0
+    shots = [s for s in shots if only is None or s.id in only]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
     n_kf = sum(steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" for s in shots)
     n_takes = sum(takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing for s in shots)
