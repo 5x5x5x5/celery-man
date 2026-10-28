@@ -94,7 +94,14 @@ def test_create_rejects_non_audio(tmp_path):
 
 def test_create_rejects_bad_name_and_kinds(tmp_path, song):
     c = client(tmp_path)
-    for name, kinds in (("../x", "footage"), ("", "footage"), ("a b", "footage"), ("ok", "footage,sideways"), ("ok", "")):
+    for name, kinds in (
+        ("../x", "footage"),
+        ("", "footage"),
+        ("a b", "footage"),
+        ("x\n", "footage"),
+        ("ok", "footage,sideways"),
+        ("ok", ""),
+    ):
         r = c.post("/api/projects", data={"name": name, "source": "s", "kinds": kinds}, files={"song": song.open("rb")})
         assert r.status_code == 422, (name, kinds)
     assert list(tmp_path.iterdir()) == []
@@ -143,6 +150,8 @@ def test_cross_site_post_refused(tmp_path, song):
     assert c.post("/api/projects", headers={"Origin": "http://evil.example"}, files={"song": song.open("rb")}, **form).status_code == 403
     assert c.post("/api/projects", headers={"Referer": "http://evil.example/x"}, files={"song": song.open("rb")}, **form).status_code == 403
     assert c.get("/api/projects", headers={"Host": "evil.example:8765"}).status_code == 400
+    for method in ("PUT", "PATCH", "DELETE"):  # every method that is not a plain read
+        assert c.request(method, "/api/projects/one", headers={"Origin": "http://evil.example"}, json={}).status_code == 403, method
     assert not (tmp_path / "one").exists()
 
 
@@ -205,7 +214,7 @@ def test_state_shape_keys(tmp_path, song):
     assert set(st["project"]) == {"id", "song", "song_source", "range", "kinds", "cap_usd", "modes", "shot_modes", "seed", "vision_flags"}
     assert set(st["timing"]) == {"duration", "windows"} and set(st["timing"]["windows"][0]) == {"id", "start", "end", "section"}
     assert st["brief"]["logline"] == "a person walks" and "inputs" not in st["brief"]
-    assert set(st["shots"][0]) == {"shot", "open", "modes", "render", "keyframe", "takes"}
+    assert set(st["shots"][0]) == {"shot", "open", "modes", "render", "keyframe", "takes", "price"}
     assert st["steps"][0]["step"] == "timing" and set(st["steps"][0]) == {"step", "state", "detail"}
     assert set(st["spend"]) == {"spent", "reserve", "cap"} and set(st["prices"]) == {"continue", "still", "keyframe_set", "take_round"}
     assert st["candidates"] == {"brief": None, "shots": {}, "keyframes": {}}

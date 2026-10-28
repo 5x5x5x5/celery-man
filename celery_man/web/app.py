@@ -24,7 +24,7 @@ from celery_man.web.state import PER_SHOT, project_state
 log = logging.getLogger(__name__)
 MODES = ("tastemaker", "auto")
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
-NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 MAX_SONG = 100 * 2**20
 DIST = Path(__file__).parent / "dist"
 NOT_BUILT = "front end not built: npm --prefix web ci && npm --prefix web run build"
@@ -104,12 +104,12 @@ def create_app(root: Path, gen_factory: Callable, chat_factory: Callable) -> Fas
 
     @app.middleware("http")
     async def same_origin(request: Request, call_next):
-        """Any web page can make the browser POST to localhost (and start paid runs): accept only our own pages."""
+        """Any web page can make the browser POST (or PUT, PATCH, DELETE) to localhost and start paid runs: accept only our own pages."""
         host = request.headers.get("host", "")
         if urlsplit(f"//{host}").hostname not in LOCAL_HOSTS:
             return PlainTextResponse("unexpected Host", 400)
         src = request.headers.get("origin") or request.headers.get("referer")
-        if request.method == "POST" and src is not None and urlsplit(src).netloc != host:
+        if request.method not in ("GET", "HEAD") and src is not None and urlsplit(src).netloc != host:
             return PlainTextResponse("cross-site request refused", 403)
         return await call_next(request)
 
@@ -126,8 +126,8 @@ def create_app(root: Path, gen_factory: Callable, chat_factory: Callable) -> Fas
         return out
 
     @app.post("/api/projects")
-    async def new_project(name: str = Form(""), song: UploadFile | None = None, source: str = Form(""), kinds: str = Form("")) -> dict:
-        if not NAME.match(name):
+    def new_project(name: str = Form(""), song: UploadFile | None = None, source: str = Form(""), kinds: str = Form("")) -> dict:
+        if not NAME.fullmatch(name):
             raise HTTPException(422, "name: 1 to 64 letters, digits, - or _")
         picked = tuple(kinds.split(","))
         if not kinds or any(k not in KINDS for k in picked):
@@ -139,7 +139,7 @@ def create_app(root: Path, gen_factory: Callable, chat_factory: Callable) -> Fas
             raise HTTPException(409, f"{name} already exists")
         if song is None:
             raise HTTPException(422, "song: an audio file is required")
-        data = await song.read(MAX_SONG + 1)
+        data = song.file.read(MAX_SONG + 1)  # a plain def: FastAPI runs it, ffprobe and the copy in its threadpool
         if not data or len(data) > MAX_SONG:
             raise HTTPException(422, "song: an audio file of at most 100 MB")
         suffix = Path(song.filename or "").suffix.lower()

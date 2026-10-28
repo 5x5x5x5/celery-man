@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
 from celery_man import auto, suggest
 from celery_man.compose import PromptTooLong, compose
@@ -8,6 +9,7 @@ from celery_man.generate import FakeGenerator
 from celery_man.ledger import Ledger
 from celery_man.project import Brief, CastMember, Place, Shot, brief_from_dict, read_json, write_json
 from celery_man.steps import STILL_MODEL, Run, ensure_open_shots, shots_inputs, windows
+from celery_man.web.app import create_app
 from tests.test_pipeline import BRIEF, make
 
 STYLE = {"medium": "ink", "palette": "grey", "lighting": "soft", "camera": "static"}
@@ -85,14 +87,15 @@ def test_too_long_footage_idea_keeps_error(tmp_path, song, monkeypatch):
     assert not any(r.get("model") == STILL_MODEL for r in Ledger(p.ledger_path).rows())
 
 
-def test_use_shot_writes_scene_and_decision(tmp_path, song):
+def test_use_shot_idea_written_through_the_shot_checks(tmp_path, song):
     p = setup(tmp_path, song)
     code = "function setup(env) {}\nfunction draw(ctx, f, env) {}"
     suggest.shots(Run(p, FakeGenerator(), chat_text=fake_chat([{"kind": "animation", "action": "a", "code": code}] * 3)), "s02", "")
     cid = read_json(p.root / "candidates/shots/s02.json")["items"][0]["id"]
-    suggest.use_shot(p, "s02", cid)
+    c = TestClient(create_app(p.root, FakeGenerator, lambda p: (None, None)), base_url="http://127.0.0.1:8765")
+    assert c.post("/api/projects/proj/shots/s02/use", json={"id": cid}).status_code == 200
     s02 = {s.id: s for s in p.load_shots()}["s02"]
-    assert s02.kind == "animation" and (p.scenes_dir / "s02.js").read_text() == code
+    assert s02.kind == "animation" and (p.root / s02.scene["file"]).read_text() == code
 
 
 def test_keyframe_suggestions_four_new_seeds(tmp_path, song):

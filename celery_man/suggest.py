@@ -7,7 +7,7 @@ from pathlib import Path
 from celery_man import auto
 from celery_man.compose import PromptTooLong, compose
 from celery_man.project import Project, Shot, brief_from_dict, read_json, sha12, shot_from_dict, update_json
-from celery_man.steps import STILL_MODEL, Run, brief_inputs, gen_stills, merge_entry, shots_inputs
+from celery_man.steps import STILL_MODEL, Run, brief_inputs, gen_stills, merge_entry
 
 log = logging.getLogger(__name__)
 KEYFRAME_SUGGESTIONS = 4
@@ -110,16 +110,13 @@ def use_brief(p: Project, cid: str) -> None:
     p.save_brief(brief_from_dict(_item(p, _path(p, "brief"), cid)["brief"]), brief_inputs(p))
 
 
-def use_shot(p: Project, sid: str, cid: str) -> None:
+def shot_idea(p: Project, sid: str, cid: str) -> dict:
+    """The candidate to use for a window, while its window is unchanged; the caller saves it through the shot edit checks."""
     item = _item(p, _path(p, "shots", sid), cid)
     new, now = shot_from_dict(item["shot"]), _shot(p, sid)
     if (new.start, new.end) != (now.start, now.end):
         raise ValueError(f"{sid}: the window moved since this idea was made; ask for new ideas")
-    if item["code"] is not None:
-        p.scenes_dir.mkdir(exist_ok=True)
-        (p.root / new.scene["file"]).write_text(item["code"])
-    stamp = shots_inputs(p, p.load_brief())
-    update_json(p, p.shots_path, lambda d: d | {"inputs": stamp, "shots": [asdict(new) if x["id"] == sid else x for x in d["shots"]]})
+    return item
 
 
 def use_keyframe(p: Project, sid: str, cid: str) -> None:

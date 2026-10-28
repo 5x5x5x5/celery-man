@@ -4,10 +4,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from celery_man import takes
-from celery_man.compose import PromptTooLong, compose
+from celery_man.compose import compose
 from celery_man.cut import cut_plan
 from celery_man.ledger import Ledger
-from celery_man.pipeline import status
+from celery_man.pipeline import estimate, status
 from celery_man.project import Brief, Project, Shot, read_json
 from celery_man.renders import render_need
 from celery_man.spend import prices, summary
@@ -56,6 +56,7 @@ def _shot(p: Project, s: Shot, brief: Brief | None, led: Ledger, rows: list[dict
         "render": None,
         "keyframe": None,
         "takes": None,
+        "price": 0.0,
     }
     if brief is None or s.is_open:
         return out
@@ -73,7 +74,7 @@ def _shot(p: Project, s: Shot, brief: Brief | None, led: Ledger, rows: list[dict
     prompt, error = "", ""
     try:
         prompt = compose(s, brief)
-    except PromptTooLong as e:
+    except ValueError as e:  # PromptTooLong, or a name the brief no longer has: shown, the project still loads
         error = str(e)
     out["keyframe"] = {
         "need": need,
@@ -83,6 +84,7 @@ def _shot(p: Project, s: Shot, brief: Brief | None, led: Ledger, rows: list[dict
         "prompt_error": error,
     }
     out["takes"] = _takes(p, led, rows, s, brief, kf, pick)
+    out["price"] = estimate(p, {s.id})  # what Continue on this shot alone would spend now
     return out
 
 

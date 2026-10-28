@@ -1,14 +1,22 @@
+import contextlib
+import io
 import json
 import re
 import threading
+import time
+from dataclasses import asdict
+from typing import ClassVar
 
+import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
+from celery_man import uploads
 from celery_man.generate import FakeGenerator
 from celery_man.ledger import Ledger
 from celery_man.pipeline import advance, held_run_lock, run_lock
-from celery_man.project import DEFAULT_MODES, read_json, write_json
-from celery_man.steps import EST_STILL_S, STILL_MODEL, ensure_open_shots
+from celery_man.project import DEFAULT_MODES, Shot, read_json, write_json
+from celery_man.steps import EST_STILL_S, EST_WALL_S, STILL_MODEL, TAKE_MODEL, ensure_open_shots, shots_inputs, windows
 from celery_man.web.app import create_app
 from tests.test_api_core import decided, wait_jobs
 from tests.test_pipeline import BRIEF, make, text_chat, vision_chat
@@ -292,3 +300,146 @@ def test_put_shot_code_written_after_validation(tmp_path, song):
     assert c.put(f"{U}/shots/s01", json={"shot": anim, "code": "draw()"}).status_code == 200
     f = p.load_shots()[0].scene["file"]
     assert re.fullmatch(r"scenes/s01-[0-9a-f]{8}\.js", f) and (p.root / f).read_text() == "draw()"
+
+
+def two_shots(tmp_path, song):
+    """decided(), over two windows."""
+    p = decided(tmp_path, song)
+    write_json(p.root / "project.json", p.config | {"range": [0, 8]})
+    p.save_shots([Shot(f"s{i:02d}", a, z, s, "a person walks", ["A"], "P", "wide shot") for i, (a, z, s) in enumerate(windows(p), 1)],
+                 shots_inputs(p, p.load_brief()))  # fmt: skip
+    assert len(p.load_shots()) == 2
+    return p
+
+
+def test_one_shot_continue_priced_for_that_shot(tmp_path, song):
+    """Generate one / Next round pay the shot's own price; a tastemaker still is priced without the takes it waits to unlock."""
+    p = two_shots(tmp_path, song)
+    c = client(p.root)
+    st = c.get(f"{U}/state").json()
+    s01, s02 = st["shots"][0], st["shots"][1]
+    assert s01["price"] == s02["price"] == st["prices"]["still"] < st["prices"]["continue"]
+    r = c.post(f"{U}/continue", json={"price": s01["price"], "only": ["s01"]})
+    assert r.status_code == 202, r.json()
+    assert wait_jobs(c, "proj")["jobs"]["errors"] == [] and set(read_json(p.keyframes_path)) == {"s01"}
+    assert c.post(f"{U}/keyframes/s01/approve").status_code == 200
+    s01 = c.get(f"{U}/state").json()["shots"][0]
+    assert s01["price"] == pytest.approx(st["prices"]["take_round"])  # the next round: three takes and a load
+    assert c.post(f"{U}/continue", json={"price": s01["price"], "only": ["s01"]}).status_code == 202
+    assert wait_jobs(c, "proj")["jobs"]["errors"] == []
+    assert {r["shot"] for r in Ledger(p.ledger_path).rows() if r.get("model") == TAKE_MODEL} == {"s01"}
+
+
+def test_generated_still_approve_and_redo(tmp_path, song):
+    p = two_shots(tmp_path, song)
+    c = client(p.root)
+    assert c.post(f"{U}/keyframes/s01/approve").status_code == 422  # no still yet
+    advance(p, FakeGenerator())
+    assert c.get(f"{U}/state").json()["shots"][0]["keyframe"]["need"] == "judge"
+    assert c.post(f"{U}/keyframes/s02/redo").status_code == 200
+    assert read_json(p.keyframes_path)["s02"]["approved"] is False
+    assert c.get(f"{U}/state").json()["shots"][1]["keyframe"]["need"] == "gen"  # the next Continue regenerates it
+    assert c.post(f"{U}/keyframes/s01/approve").status_code == 200
+    assert read_json(p.keyframes_path)["s01"]["approved"] is True
+    assert c.post(f"{U}/keyframes/s01/approve").status_code == 422  # already decided
+    assert c.post(f"{U}/keyframes/s01/redo").status_code == 422
+
+
+def test_state_loads_after_cast_rename_and_too_long_prompt(tmp_path, song):
+    p = two_shots(tmp_path, song)
+    c = client(p.root)
+    buf = io.BytesIO()
+    Image.new("RGB", (960, 544), (9, 9, 9)).save(buf, "PNG")
+    assert c.post(f"{U}/uploads/keyframe/s01", files={"file": ("k.png", buf.getvalue())}).status_code == 200
+    advance(p, FakeGenerator())
+    renamed = BRIEF | {"cast": [{"name": "B", "description": "a tall person"}]}
+    assert c.put(f"{U}/brief", json={"brief": renamed}).status_code == 200
+    r = c.get(f"{U}/state")
+    assert r.status_code == 200, r.json()
+    s01, s02 = r.json()["shots"][:2]
+    assert "unknown cast member: A" in s02["keyframe"]["prompt_error"] and s02["keyframe"]["need"] == "gen"
+    assert s01["keyframe"]["changed_since_upload"] is True and s01["takes"]["need"] == "edit"
+    long = [asdict(s) | {"cast": ["B"], "action": "a person walks " * 200} for s in p.load_shots()]
+    write_json(p.shots_path, read_json(p.shots_path) | {"shots": long})
+    r = c.get(f"{U}/state")
+    assert r.status_code == 200 and r.json()["shots"][1]["keyframe"]["prompt_error"].startswith("prompt is")
+
+
+def test_slow_upload_does_not_block_state(tmp_path, song, monkeypatch):
+    p = decided(tmp_path, song)
+    monkeypatch.setattr(uploads, "import_take", lambda *a: time.sleep(2) or {})
+    with client(p.root) as c:
+        t = threading.Thread(target=lambda: c.post(f"{U}/uploads/take/s01", files={"file": ("t.mp4", b"x")}))
+        t.start()
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        assert c.get(f"{U}/state").status_code == 200
+        assert time.monotonic() - t0 < 1.5
+        t.join()
+
+
+class SessionGen(FakeGenerator):
+    events: ClassVar[list[str]] = []
+
+    @contextlib.contextmanager
+    def session(self):
+        self.events.append("enter")
+        yield
+        self.events.append("exit")
+
+
+def test_suggestion_jobs_close_the_generator_session(tmp_path, song):
+    p = decided(tmp_path, song)
+    idea = {"kind": "footage", "action": "a person sits", "cast": ["A"], "place": "P", "framing": "close"}
+    SessionGen.events = []
+    c = client(p.root, gen=SessionGen, chats=lambda p: (lambda s, u, i: json.dumps([idea] * 3), no_chat))
+    prices = c.get(f"{U}/state").json()["prices"]
+    assert c.post(f"{U}/suggest/keyframes/s01", json={"price": prices["keyframe_set"]}).status_code == 202
+    wait_jobs(c, "proj")
+    assert SessionGen.events == ["enter", "exit"]
+    assert c.post(f"{U}/suggest/shots", json={"shots": ["s01"], "steer": "", "price": prices["still"] * 3}).status_code == 202
+    wait_jobs(c, "proj")
+    assert SessionGen.events == ["enter", "exit"] * 2
+
+
+class BilledGen(FakeGenerator):
+    """Bills each job at the estimate, as Modal roughly does, so the ledger's spend matches the price shown."""
+
+    def _one(self, job):
+        res = super()._one(job)
+        return res | {"wall_s": EST_STILL_S if "png" in res else EST_WALL_S}
+
+
+def reject_takes_chat(system, user, images):
+    if "keyframe image" in system:
+        return '{"ok": true, "why": "fine"}'
+    return '{"pick": 0, "why": "steady"}' if "must pick one" in system else '{"pick": null, "why": "morphing"}'
+
+
+def test_continue_stops_at_the_price_shown_when_auto_rejects(tmp_path, song):
+    p = decided(tmp_path, song)
+    write_json(p.root / "project.json", p.config | {"shot_modes": {"s01": {"keyframes": "auto", "takes": "auto"}}})
+    c = client(p.root, gen=BilledGen, chats=lambda p: (text_chat, reject_takes_chat))
+    price = c.get(f"{U}/state").json()["shots"][0]["price"]  # one still, round 1 and a load
+    assert c.post(f"{U}/continue", json={"price": price, "only": ["s01"]}).status_code == 202
+    assert wait_jobs(c, "proj")["jobs"]["errors"] == []
+    rows = [r for r in Ledger(p.ledger_path).rows() if r.get("kind") == "job" and r.get("shot") == "s01"]
+    assert sum(r["model"] == STILL_MODEL for r in rows) == 1
+    assert sorted(r["round"] for r in rows if r["model"] == TAKE_MODEL) == [1, 1, 1]
+    assert read_json(p.picks_path)["s01"]["rejected"] is True and p.load_shots()[0].action == "a person stands"
+
+
+def test_use_shot_idea_goes_through_the_shot_checks(tmp_path, song):
+    p = decided(tmp_path, song)
+    c = client(p.root)
+    s = shot(c)
+    path = p.root / "candidates" / "shots" / "s01.json"
+    path.parent.mkdir(parents=True)
+    bad = [{"id": "anim", "shot": s | {"kind": "animation", "scene": {"template": "rings", "params": {}}}, "code": None},
+           {"id": "name", "shot": s | {"cast": ["Z"]}, "code": None},
+           {"id": "long", "shot": s | {"action": "a person walks " * 200}, "code": None}]  # fmt: skip
+    write_json(path, {"items": bad})
+    before = p.shots_path.read_text()
+    for cid in ("anim", "name", "long"):
+        assert c.post(f"{U}/shots/s01/use", json={"id": cid}).status_code == 422, cid
+    assert p.shots_path.read_text() == before
