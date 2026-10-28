@@ -114,9 +114,10 @@ def _quick(a) -> int:
 def _serve(a) -> int:
     import uvicorn
 
-    from celery_man.web.app import create_app  # Task 11
+    from celery_man.web.app import create_app
 
-    uvicorn.run(create_app(Project(a.dir), make_generator, make_chats), host="127.0.0.1", port=a.port)
+    # dir: one project folder, or a folder of project folders (where the page creates new ones)
+    uvicorn.run(create_app(a.dir, make_generator, make_chats), host="127.0.0.1", port=a.port)
     return 0
 
 

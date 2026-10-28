@@ -3,6 +3,7 @@
 import fcntl
 import logging
 import os
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ RUNNERS = {
     "assemble": steps.run_assemble,
 }
 MAX_PASSES = 20
+_held = threading.local()  # roots: projects whose run.lock this thread holds through held_run_lock
 SPENDING = ("keyframes", "takes")
 
 
@@ -52,12 +54,27 @@ class Declined(RuntimeError):
 @contextmanager
 def run_lock(p: Project) -> Iterator[None]:
     """Exclusive, non-blocking lock on root/run.lock for a whole advance or quick, across processes."""
+    if p.root.resolve() in _held.__dict__.get("roots", ()):  # inside held_run_lock on this thread: already ours
+        yield
+        return
     with (p.root / "run.lock").open("a") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise BusyError(f"another run is going in {p.root}") from None
         yield
+
+
+@contextmanager
+def held_run_lock(p: Project) -> Iterator[None]:
+    """run_lock for the web's paid worker: the job inside may call advance or quick, which take run_lock again."""
+    with run_lock(p):
+        roots, key = _held.__dict__.setdefault("roots", set()), p.root.resolve()
+        roots.add(key)
+        try:
+            yield
+        finally:
+            roots.discard(key)
 
 
 def run_busy(p: Project) -> bool:

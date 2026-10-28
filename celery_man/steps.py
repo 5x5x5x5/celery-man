@@ -74,8 +74,9 @@ def shots_problem(p: Project, shots: list[Shot]) -> str:
     return ""
 
 
-def ensure_open_shots(p: Project) -> None:
-    """While no shot is decided, shots.json holds one open shot per window, rewritten when the windows (or brief names) change."""
+def ensure_open_shots(p: Project, reset: bool = False) -> None:
+    """While no shot is decided, shots.json holds one open shot per window, rewritten when the windows (or brief names) change.
+    reset: reopen every shot, decided or not (a range or kinds change the tastemaker confirmed)."""
     brief = p.load_brief()
     want = {
         "inputs": shots_inputs(p, brief) if brief else "",
@@ -83,7 +84,7 @@ def ensure_open_shots(p: Project) -> None:
     }
 
     def fill(d: dict | None) -> dict:
-        return want if d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d
+        return want if reset or d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d
 
     if fill(d := read_json(p.shots_path)) != d:  # nothing is rewritten unchanged
         update_json(p, p.shots_path, fill)
