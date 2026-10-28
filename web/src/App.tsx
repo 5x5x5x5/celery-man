@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listProjects } from "./api";
+import { ContinueButton } from "./PricedButton";
 import { JobsBadge } from "./JobsBadge";
 import { SpendMeter } from "./SpendMeter";
 import { StepStrip } from "./StepStrip";
@@ -46,6 +47,7 @@ function ProjectView({ pid, step }: { pid: string; step: Step }) {
         <a href="#/">Projects</a>
         <strong>{pid}</strong>
         <span className="grow" />
+        {state && <ContinueButton pid={pid} state={state} onDone={refresh} />}
         {state && <SpendMeter spend={state.spend} />}
         {state && <JobsBadge jobs={state.jobs} />}
       </header>
