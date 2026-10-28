@@ -101,3 +101,14 @@ def test_non_video_take_refused(proj):
     with pytest.raises(UploadError):
         import_take(p, "s01", b"not a video")
     assert not p.picks_path.exists()
+
+
+def test_unknown_shot_upload_writes_nothing(proj, tmp_path):
+    p, _ = proj
+    with pytest.raises(UploadError):
+        import_keyframe(p, "s99", png_bytes(100, 100))
+    with pytest.raises(UploadError):
+        import_take(p, "s99", mp4_bytes(5, tmp_path))
+    assert not p.keyframes_path.exists() and not p.picks_path.exists()
+    for d in (p.keys_dir, p.takes_dir):
+        assert not d.exists() or not list(d.glob("*"))

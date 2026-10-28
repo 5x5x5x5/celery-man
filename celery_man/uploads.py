@@ -25,7 +25,16 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:12]
 
 
+def _shot_and_brief(p: Project, sid: str) -> tuple[Shot, Brief]:
+    brief = p.load_brief()
+    shot = next((s for s in p.load_footage() or [] if s.id == sid), None)
+    if shot is None or brief is None:
+        raise UploadError(f"there is no footage shot {sid} to attach this to")
+    return shot, brief
+
+
 def import_keyframe(p: Project, sid: str, data: bytes) -> dict:
+    shot, brief = _shot_and_brief(p, sid)
     if not data or len(data) > MAX_IMAGE:
         raise UploadError("the image must be a PNG or JPEG of at most 20 MB")
     try:
@@ -44,16 +53,15 @@ def import_keyframe(p: Project, sid: str, data: bytes) -> dict:
     tmp = p.root / (rel + ".tmp")
     out.save(tmp, "PNG")
     os.replace(tmp, p.root / rel)
-    shot = next(s for s in p.load_footage() if s.id == sid)
-    entry = {"path": rel, "seed": 0, "prompt_sha": prompt_sha(shot, p.load_brief()), "approved": True, "note": "uploaded", "uploaded": True}
+    entry = {"path": rel, "seed": 0, "prompt_sha": prompt_sha(shot, brief), "approved": True, "note": "uploaded", "uploaded": True}
     merge_entry(p, p.keyframes_path, sid, entry)
     return entry
 
 
 def import_take(p: Project, sid: str, data: bytes, in_point: float = 0.0) -> dict:
+    shot, brief = _shot_and_brief(p, sid)
     if not data or len(data) > MAX_CLIP:
         raise UploadError("the clip must be a video of at most 200 MB")
-    shot = next(s for s in p.load_footage() if s.id == sid)
     key = f"upload-{_digest(data)}"
     p.takes_dir.mkdir(exist_ok=True)
     src, tmp = p.takes_dir / f"{key}.src.tmp", p.takes_dir / f"{key}.tmp.mp4"
@@ -82,7 +90,7 @@ def import_take(p: Project, sid: str, data: bytes, in_point: float = 0.0) -> dic
         src.unlink(missing_ok=True)
         tmp.unlink(missing_ok=True)
     pick = {"key": key, "clip": f"takes/{key}.mp4", "in": in_point, "round": 0, "gen": 0, "quick": False, "uploaded": True,
-            "shot_sha": sha12(asdict(shot)), "prompt_sha": prompt_sha(shot, p.load_brief())}  # fmt: skip
+            "shot_sha": sha12(asdict(shot)), "prompt_sha": prompt_sha(shot, brief)}  # fmt: skip
     merge_entry(p, p.picks_path, sid, pick)
     return pick
 
