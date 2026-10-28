@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
+from celery_man import templates
 from celery_man.project import DEFAULT_MODES, KINDS, OPEN, Project, read_json, update_json
 from celery_man.steps import Run, ensure_open_shots, run_timing
 from celery_man.timing import TimingError, plan_windows
@@ -111,6 +112,10 @@ def create_app(root: Path, gen_factory: Callable, chat_factory: Callable) -> Fas
         if request.method == "POST" and src is not None and urlsplit(src).netloc != host:
             return PlainTextResponse("cross-site request refused", 403)
         return await call_next(request)
+
+    @app.get("/api/templates")
+    def template_catalogue() -> dict:
+        return templates.catalogue()
 
     @app.get("/api/projects")
     def list_projects() -> list[dict]:

@@ -270,3 +270,8 @@ def test_continue_only_must_be_ids(tmp_path, song):
     price = c.get(f"{U}/state").json()["prices"]["continue"]
     for bad in ([1], [["s01"]], [None], "s01"):
         assert c.post(f"{U}/continue", json={"price": price, "only": bad}).status_code == 422, bad
+
+
+def test_templates_catalogue_served(tmp_path, song):
+    cat = client(decided(tmp_path, song).root).get("/api/templates").json()
+    assert cat["bars"]["params"]["count"]["type"] == "integer"

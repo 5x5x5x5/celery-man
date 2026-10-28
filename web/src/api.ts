@@ -1,4 +1,4 @@
-import type { Brief, Kind, Shot, State } from "./types";
+import type { Brief, Kind, Shot, State, Templates } from "./types";
 
 export type Paid = { ok: true; job?: string } | { ok: false; price?: number; reason?: string };
 
@@ -109,3 +109,4 @@ export const previewUrl = (pid: string, sid: string, candidate?: string) =>
   `${base(pid)}/preview?sid=${encodeURIComponent(sid)}${candidate ? `&candidate=${encodeURIComponent(candidate)}` : ""}`;
 export const getFrames = (pid: string, start: number, end: number) =>
   json<unknown[]>("GET", `${base(pid)}/frames?start=${start}&end=${end}`);
+export const getTemplates = () => json<Templates>("GET", "/api/templates");

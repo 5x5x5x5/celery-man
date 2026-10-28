@@ -4,6 +4,8 @@ import { ContinueButton } from "./PricedButton";
 import { JobsBadge } from "./JobsBadge";
 import { SpendMeter } from "./SpendMeter";
 import { StepStrip } from "./StepStrip";
+import { Brief } from "./steps/Brief";
+import { Shots } from "./steps/Shots";
 import { NewProject, Song } from "./steps/Song";
 import { STEPS } from "./types";
 import type { Step } from "./types";
@@ -56,7 +58,9 @@ function ProjectView({ pid, step }: { pid: string; step: Step }) {
         {error && <p className="error">{error}</p>}
         {!state && !error && <p className="muted">Loading…</p>}
         {state && step === "song" && <Song state={state} refresh={refresh} />}
-        {state && step !== "song" && <p className="muted">The {step} step is not built yet.</p>}
+        {state && step === "brief" && <Brief state={state} refresh={refresh} />}
+        {state && step === "shots" && <Shots state={state} refresh={refresh} />}
+        {state && !["song", "brief", "shots"].includes(step) && <p className="muted">The {step} step is not built yet.</p>}
       </main>
     </>
   );

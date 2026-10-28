@@ -50,3 +50,10 @@ ul.plain li { padding: .5rem 0; border-bottom: 1px solid var(--rule); }
 .shotstrip .open { background: var(--open); color: var(--ink); }
 .shotstrip .here { outline: 2px solid var(--ink); }
 .preview iframe { width: 100%; aspect-ratio: 960 / 544; border: 1px solid var(--rule); background: var(--card); }
+.badge { font-size: .75em; opacity: .85; }
+.err-inline { color: var(--warn); margin: .1rem 0 0; font-size: .85em; }
+.swatches { display: flex; gap: 2px; margin: .25rem 0; }
+.swatches i { width: 1.2rem; height: 1.2rem; border: 1px solid var(--rule); }
+.bulk { display: flex; gap: 1rem; align-items: center; margin: .75rem 0; flex-wrap: wrap; }
+textarea.code { width: 100%; min-height: 10rem; font-family: ui-monospace, monospace; border: 1px solid var(--rule); background: var(--card); }
+select, input[type="number"], input[type="color"], textarea { border: 1px solid var(--rule); background: var(--card); border-radius: 3px; padding: .25rem .4rem; }

@@ -153,3 +153,20 @@ export interface State {
   jobs: Jobs;
   cut: CutItem[];
 }
+
+export interface ParamSpec {
+  type: "number" | "integer" | "string" | "choice" | "bool";
+  default: unknown;
+  min?: number;
+  max?: number;
+  choices?: string[];
+  doc?: string;
+}
+export type Templates = Record<string, { family: string; description: string; params: Record<string, ParamSpec> }>;
+export interface ShotIdea {
+  id: string;
+  shot: Shot;
+  code?: string;
+  still?: string;
+  error?: string;
+}
