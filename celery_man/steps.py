@@ -11,11 +11,11 @@ from pathlib import Path
 
 from celery_man import auto, features
 from celery_man.animate import SCENES, ChromiumRenderer, Renderer
-from celery_man.assemble import assemble
+from celery_man.assemble import assemble, card_clip, still_clip
 from celery_man.compose import compose, prompt_sha
 from celery_man.generate import Generator, StillJob
 from celery_man.ledger import Ledger, cost, job_key
-from celery_man.project import OPEN, Brief, Project, Shot, open_shot, read_json, sha12, update_json, write_json
+from celery_man.project import DEFAULT_LOOK, OPEN, Brief, Project, Shot, open_shot, read_json, sha12, update_json, write_json
 from celery_man.timing import detect, plan_windows
 
 log = logging.getLogger(__name__)
@@ -257,13 +257,29 @@ def run_keyframes(run: Run) -> None:
             merge_entry(p, p.keyframes_path, s.id, kfs[s.id])
 
 
+def _filler_clip(p: Project, item: dict, look: dict, fps: int = 24) -> Path:
+    """The cached still push-in, text card or blank card for one window."""
+    secs = (round(item["end"] * fps) - round(item["start"] * fps)) / fps
+    out = p.root / "fill" / f"{sha12([item['kind'], item['src'], item['text'], secs, look])}.mp4"
+    if out.exists():
+        return out
+    if item["kind"] == "still":
+        return still_clip(p.root / item["src"], secs, out)
+    return card_clip(item["text"], look, secs, out)
+
+
 def run_assemble(run: Run) -> None:
+    from celery_man.cut import cut_plan  # cut imports this module
+
     p = run.p
-    shots, picks, ren = p.load_shots(), read_json(p.picks_path) or {}, read_json(p.renders_path) or {}
-    src = {s.id: (ren[s.id]["clip"], 0) if s.kind == "animation" else (picks[s.id]["clip"], picks[s.id]["in"]) for s in shots}
-    cuts = [{"clip": str(p.root / src[s.id][0]), "in": src[s.id][1], "start": s.start, "end": s.end} for s in shots]
+    brief = p.load_brief()
+    look = brief.look if brief else DEFAULT_LOOK
+    cuts = []
+    for item in cut_plan(p):
+        clip = _filler_clip(p, item, look) if item["kind"] in ("still", "card", "blank") else p.root / item["src"]
+        cuts.append({"clip": str(clip), "in": item["in"], "start": item["start"], "end": item["end"]})
     p.out_dir.mkdir(exist_ok=True)
-    tmp = p.out_dir / "video.tmp.mp4"
+    tmp = p.out_dir / f"video.{os.getpid()}-{time.time_ns()}.tmp.mp4"
     assemble(cuts, p.song, tmp)
     os.replace(tmp, p.out_dir / "video.mp4")
     write_report(p, run.led)
@@ -276,6 +292,9 @@ def write_report(p: Project, led: Ledger) -> None:
     lines = ["# Report", "", f"Decided by: brief {m['brief']}, shots {m['shots']}, keyframes {m['keyframes']}, takes {m['takes']}.", ""]
     ren = read_json(p.renders_path) or {}
     for s in shots:
+        if s.is_open:
+            lines.append(f"- **{s.id}** (open window)")
+            continue
         if s.kind == "animation":
             sc, key = s.scene, ren.get(s.id, {}).get("key", "-")
             what = f"template `{sc['template']}`" if "template" in sc else f"file `{sc['file']}`"
@@ -295,6 +314,10 @@ def write_report(p: Project, led: Ledger) -> None:
         pick = f"`{pk['key']}`{how}" if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
         lines.append(f"- **{s.id}** (footage): gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
+    from celery_man.cut import cut_plan  # cut imports this module
+
+    if filled := [c for c in cut_plan(p) if c["kind"] in ("still", "card", "blank")]:
+        lines += ["", "## Filled windows", ""] + [f"- **{c['shot']}**: {c['kind']}" for c in filled]
     if fell_back := [s.id for s in shots if picks.get(s.id, {}).get("quick")]:
         lines += ["", "## Quick fallback (cap reached)", "", "One unreviewed quick take each: " + ", ".join(fell_back)]
     if fell_back := [s.id for s in shots if s.scene and s.scene.get("note", "").startswith("fallback:")]:

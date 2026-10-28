@@ -140,10 +140,10 @@ def status(p: Project, only: set[str] | None = None) -> list[StepState]:
     }
     out.append(_per_shot(p, "takes", needs, {"judge", "edit"}, p.picks_path.exists()))
     video = p.out_dir / "video.mp4"
-    inputs = [f.stat().st_mtime for f in (p.picks_path, p.renders_path) if f.exists()]
+    inputs = [f.stat().st_mtime for f in (p.picks_path, p.renders_path, p.keyframes_path, p.shots_path) if f.exists()]
     if not video.exists():
         out.append(StepState("assemble", "missing"))
-    elif out[3].state != "done" or out[-1].state != "done" or video.stat().st_mtime < max(inputs, default=0):
+    elif video.stat().st_mtime < max(inputs, default=0):
         out.append(StepState("assemble", "stale"))
     else:
         out.append(StepState("assemble", "done"))
@@ -240,7 +240,7 @@ def advance(
     only: set[str] | None = None,
 ) -> list[StepState]:
     """Run steps in order until everything is done or waiting, a timing or brief decision is missing, or a step cannot finish.
-    A per-shot step waiting on some shots is passed over, so the other shots move ahead; assemble runs once all else is done.
+    A per-shot step waiting on some shots is passed over, so the other shots move ahead; assemble runs once all else is done or waiting per shot (it fills those windows).
     only limits the per-shot runners to those shot ids.
     confirm gets the estimate once, at the first spending step (the brief and shots exist by then); False stops there."""
     run = steps.Run(p, gen, chat_text, chat_vision, renderer, only)
@@ -252,7 +252,7 @@ def advance(
             i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.per_shot)), None)
             if i is None or sts[i].state == "waiting":
                 return status(p)
-            if sts[i].step == "assemble" and any(s.state != "done" for s in status(p)[:i]):
+            if sts[i].step == "assemble" and any(s.state != "done" and not (s.state == "waiting" and s.per_shot) for s in status(p)[:i]):
                 return status(p)
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
