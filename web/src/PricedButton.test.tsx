@@ -18,3 +18,14 @@ test("a reason disables the button and is shown", async () => {
   expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(true);
 });
 afterEach(cleanup);
+
+test("a thrown error is shown, then cleared when the price changes", async () => {
+  const onConfirm = async () => {
+    throw new Error("server down");
+  };
+  const { rerender } = render(<PricedButton label="Go" price={0.1} onConfirm={onConfirm} />);
+  fireEvent.click(screen.getByRole("button"));
+  await screen.findByText("server down");
+  rerender(<PricedButton label="Go" price={0.3} onConfirm={onConfirm} />);
+  expect(screen.queryByText("server down")).toBeNull();
+});

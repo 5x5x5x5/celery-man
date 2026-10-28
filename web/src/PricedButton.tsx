@@ -16,15 +16,19 @@ export function PricedButton({ label, price, onConfirm, disabledReason }: {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => setShown(price), [price]);
+  useEffect(() => setReason(""), [price, disabledReason]);
 
   const click = async () => {
     setBusy(true);
+    setReason("");
     try {
       const r = await onConfirm(shown);
       if (!r.ok) {
         if (r.reason) setReason(r.reason);
         else if (r.price !== undefined) setShown(r.price);
       }
+    } catch (e) {
+      setReason(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }

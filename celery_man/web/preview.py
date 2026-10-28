@@ -17,8 +17,10 @@ addEventListener("securitypolicyviolation", (e) => send(`blocked ${e.violatedDir
 addEventListener("message", async (e) => {
   const m = e.data || {};
   try {
-    if (m.type === "init") await window.__init({ ...window.__PREVIEW, frame_limit_ms: Infinity, ...m.payload });
-    else if (m.type === "frame") window.__draw(m.f);
+    if (m.type === "init") {
+      await window.__init({ ...window.__PREVIEW, frame_limit_ms: Infinity, ...m.payload });
+      parent.postMessage({ type: "ready" }, "*");
+    } else if (m.type === "frame") window.__draw(m.f);
   } catch (err) {
     send(err.message || err);
   }

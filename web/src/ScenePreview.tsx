@@ -9,6 +9,7 @@ export function ScenePreview({ pid, sid, candidate, start, end }: { pid: string;
   const [doc, setDoc] = useState<string>();
   const [error, setError] = useState("");
   const [frames, setFrames] = useState<Record<string, unknown>[]>([]);
+  const [ready, setReady] = useState(false); // the scene has finished its async setup
   const t = useSongTime();
 
   useEffect(() => {
@@ -25,21 +26,21 @@ export function ScenePreview({ pid, sid, candidate, start, end }: { pid: string;
     };
   }, [pid, sid, candidate, start, end]);
 
+  useEffect(() => setReady(false), [doc]);
+
   // only the iframe's own window may speak; its text is shown as text
   useEffect(() => {
     const on = (e: MessageEvent) => {
-      if (e.source !== frame.current?.contentWindow || e.data?.type !== "error") return;
-      setError(String(e.data.message));
+      if (e.source !== frame.current?.contentWindow) return;
+      if (e.data?.type === "ready") setReady(true);
+      else if (e.data?.type === "error") setError(String(e.data.message));
     };
     window.addEventListener("message", on);
     return () => window.removeEventListener("message", on);
   }, []);
 
-  const [ready, setReady] = useState(false);
-  useEffect(() => setReady(false), [doc]);
   const init = () => {
     frame.current?.contentWindow?.postMessage({ type: "init", payload: { ...SIZE, duration: end - start } }, "*");
-    setReady(true);
   };
 
   useEffect(() => {

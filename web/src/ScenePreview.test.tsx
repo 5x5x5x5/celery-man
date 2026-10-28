@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ScenePreview } from "./ScenePreview";
 
@@ -20,3 +20,21 @@ test("only the iframe's own errors are shown, and as text", () => {
   expect(container.querySelector("b")).toBeNull();
 });
 afterEach(cleanup);
+
+test("frames wait for the source-matched ready message", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => (url.includes("/frames") ? new Response(JSON.stringify([{ song_t: 0 }])) : new Response("<html></html>"))),
+  );
+  const { container } = render(<ScenePreview pid="p" sid="s02" start={0} end={2.5} />);
+  const win = container.querySelector("iframe")!.contentWindow!;
+  const spy = vi.spyOn(win, "postMessage");
+  await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+  fireEvent.load(container.querySelector("iframe")!);
+  const types = () => spy.mock.calls.map((c) => (c[0] as { type: string }).type);
+  expect(types()).toEqual(["init"]);
+  act(() => void window.dispatchEvent(new MessageEvent("message", { data: { type: "ready" }, source: window })));
+  expect(types()).toEqual(["init"]);
+  act(() => void window.dispatchEvent(new MessageEvent("message", { data: { type: "ready" }, source: win })));
+  expect(types()).toContain("frame");
+});

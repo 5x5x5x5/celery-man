@@ -6,18 +6,18 @@ const LABELS: [View, string][] = [["auto", "Auto"], ["suggestions", "Suggestions
 /** Suggestions and manual are both the API's tastemaker mode; only the view differs. */
 export const apiMode = (v: View): Mode => (v === "auto" ? "auto" : "tastemaker");
 
-const key = (shot: string) => `view:${shot}`;
+const key = (pid: string, shot: string) => `view:${pid}:${shot}`;
 /** The UI-only suggestions/manual choice for a shot. */
-export function loadView(shot: string): "suggestions" | "manual" {
+export function loadView(pid: string, shot: string): "suggestions" | "manual" {
   try {
-    return localStorage.getItem(key(shot)) === "manual" ? "manual" : "suggestions";
+    return localStorage.getItem(key(pid, shot)) === "manual" ? "manual" : "suggestions";
   } catch {
     return "suggestions";
   }
 }
-export function saveView(shot: string, v: View): void {
+export function saveView(pid: string, shot: string, v: View): void {
   try {
-    if (v !== "auto") localStorage.setItem(key(shot), v);
+    if (v !== "auto") localStorage.setItem(key(pid, shot), v);
   } catch {
     /* storage unavailable: the choice just won't persist */
   }
