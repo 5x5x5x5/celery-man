@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -201,37 +201,45 @@ def run_shots(run: Run) -> None:
     )
 
 
-def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:
-    """Generate keyframes into keys/ and keyframes.json; returns the shots whose still failed."""
+def gen_stills(run: Run, jobs: list[tuple[str, str, int]], landed: Callable[[int, Path], None] | None = None) -> list[Path | None]:
+    """Generate (shot id, prompt, seed) stills into keys/ with their ledger rows; a failed job gives None. keyframes.json is not
+    touched: landed(job index, path) runs as each still lands, so a caller can record it before the batch ends."""
     if not jobs:
         return []
-    p, led, failed = run.p, run.led, []
-    prompts = [compose(s, brief) for s, _ in jobs]
+    p, led, out = run.p, run.led, []
     p.keys_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs), EST_STILL_S, STILL_GPU)):
             raise BudgetError(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         with reserved(led, STILL_GPU, EST_STILL_S * (len(jobs) + 1)):
-            results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
-            for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
-                row = {"key": job_key(s.id, seed, pr, b""), "shot": s.id, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
+            results = run.generator().stills([StillJob(sid, pr, seed) for sid, pr, seed in jobs])
+            for n, ((sid, pr, seed), res) in enumerate(zip(jobs, results, strict=True)):
+                row = {"key": job_key(sid, seed, pr, b""), "shot": sid, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
                 if isinstance(res, BaseException):
-                    log.error("keyframe %s failed: %r", s.id, res)
+                    log.error("keyframe %s failed: %r", sid, res)
                     led.append(_row(**row, keyframe="", output=None, gpu=STILL_GPU, wall_s=EST_STILL_S, failed=True, error=repr(res)))
-                    failed.append(s)
+                    out.append(None)
                     continue
-                dest = p.keys_dir / f"{s.id}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
+                dest = p.keys_dir / f"{sid}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
                 _write_bytes(dest, res["png"])
                 led.append(_row(**row, keyframe="", output=str(dest.resolve()), gpu=res["gpu"], wall_s=res["wall_s"]))
-                kfs[s.id] = {
-                    "path": str(dest.relative_to(p.root)),
-                    "seed": seed,
-                    "prompt_sha": sha12(pr),
-                    "approved": approved,
-                    "note": note,
-                }
-                merge_entry(p, p.keyframes_path, s.id, kfs[s.id])  # each still is recorded as it lands, so a kill keeps the finished ones
-    return failed
+                out.append(dest)
+                if landed:
+                    landed(n, dest)
+    return out
+
+
+def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:
+    """Generate keyframes into keys/ and keyframes.json; returns the shots whose still failed."""
+    prompts = [compose(s, brief) for s, _ in jobs]
+
+    def record(n: int, dest: Path) -> None:
+        (s, seed), pr = jobs[n], prompts[n]
+        kfs[s.id] = {"path": str(dest.relative_to(run.p.root)), "seed": seed, "prompt_sha": sha12(pr), "approved": approved, "note": note}
+        merge_entry(run.p, run.p.keyframes_path, s.id, kfs[s.id])  # each still is recorded as it lands, so a kill keeps the finished ones
+
+    paths = gen_stills(run, [(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)], record)
+    return [s for (s, _), path in zip(jobs, paths) if path is None]
 
 
 def run_keyframes(run: Run) -> None:
