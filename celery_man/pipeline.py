@@ -13,6 +13,7 @@ from celery_man import renders, steps, takes
 from celery_man.animate import Renderer
 from celery_man.assemble import assemble
 from celery_man.auto import AutoError, ChatFn
+from celery_man.compose import prompt_sha_or_none
 from celery_man.generate import Generator
 from celery_man.ledger import Ledger, cost
 from celery_man.project import Brief, Project, Shot, read_json, write_json
@@ -177,13 +178,21 @@ def estimate(p: Project, only: set[str] | None = None) -> float:
     shots = [s for s in shots if only is None or s.id in only]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
     n_kf = sum(steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" and not (picks.get(s.id) or {}).get("uploaded") for s in shots)
-    n_takes = sum(takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing for s in shots)
+
+    def n_take(s: Shot) -> int:
+        # a tastemaker keyframe this call makes or leaves pending waits for approval: its takes come in a later call
+        if p.mode("keyframes", s.id) == "tastemaker" and steps.kf_need(p, s, brief, kfs.get(s.id)) != "done":
+            return 0
+        return takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).missing
+
+    n_takes = sum(map(n_take, shots))
     return cost(n_kf, steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 
 
 def _quick_price(p: Project, led: Ledger, shots: list[Shot], brief: Brief, kfs: dict) -> float:
     """Only what a quick pass would actually generate: missing/stale stills, takes not in the ledger, one load if any take."""
-    stills = {s.id for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen"}
+    # a shot whose prompt cannot be built (an uploaded keyframe stays done) is priced as stale: a new still and take once fixed
+    stills = {s.id for s in shots if steps.kf_need(p, s, brief, kfs.get(s.id)) == "gen" or prompt_sha_or_none(s, brief) is None}
     n_takes = sum(s.id in stills or not led.done(takes.quick_key(p, s, brief, kfs[s.id])) for s in shots)
     return cost(len(stills), steps.EST_STILL_S, steps.STILL_GPU) + (cost(n_takes + 1, steps.EST_WALL_S, steps.TAKE_GPU) if n_takes else 0.0)
 
@@ -261,12 +270,13 @@ def advance(
     """Run steps in order until everything is done or waiting, a timing or brief decision is missing, or a step cannot finish.
     A per-shot step waiting on some shots is passed over, so the other shots move ahead; assemble runs once all else is done or waiting per shot (it fills those windows).
     only limits the per-shot runners to those shot ids.
-    confirm gets the estimate once, at the first spending step (the brief and shots exist by then); False stops there."""
+    confirm gets, before every spending step, what this call has spent so far plus the estimate for the rest (the brief and
+    shots exist by then); False stops there, so a call never spends past the price confirmed at its first spend."""
     run = steps.Run(p, gen, chat_text, chat_vision, renderer, only)
     with run_lock(p), run.stack:
         if p.timing_path.exists():
             steps.ensure_open_shots(p)
-        sts, checked = status(p, only), False
+        sts, checked, start = status(p, only), False, run.led.spent_usd()
         for _ in range(MAX_PASSES):
             i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.per_shot)), None)
             if i is None or sts[i].state == "waiting":
@@ -274,12 +284,14 @@ def advance(
             if sts[i].step == "assemble" and any(s.state != "done" and not (s.state == "waiting" and s.per_shot) for s in status(p)[:i]):
                 return status(p)
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
-            if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
-                checked = True
-                if confirm and not confirm(est := estimate(p, only)):
+            if sts[i].step in SPENDING:
+                # an auto rejection can loop back to a new still and round: confirm before each spend, not only the first
+                if confirm and not confirm(est := run.led.spent_usd() - start + estimate(p, only)):
                     log.info("advance: stopped before spending ($%.2f declined)", est)
                     return status(p)
-                _preflight(p, run.led, quick_cost(p))
+                if not checked:  # once per call, before the first spend
+                    checked = True
+                    _preflight(p, run.led, quick_cost(p))
             RUNNERS[sts[i].step](run)
             sts = status(p, only)
             # stop on failures instead of retrying (and re-billing) in the same call; an upstream step going stale is progress

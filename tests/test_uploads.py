@@ -67,6 +67,20 @@ def test_keyframe_upload_is_960x544(proj):
     assert Image.open(p.root / e["path"]).size == (960, 544)
 
 
+def test_keyframe_upload_follows_exif_orientation(proj):
+    """Stored landscape, left half red and right half blue; EXIF says turn it upright: red on top once turned."""
+    p, _ = proj
+    im = Image.new("RGB", (960, 544), (255, 0, 0))
+    im.paste((0, 0, 255), (480, 0, 960, 544))
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to view
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", exif=exif)
+    out = Image.open(p.root / import_keyframe(p, "s01", buf.getvalue())["path"]).convert("RGB")
+    left, right = out.getpixel((10, 10)), out.getpixel((950, 10))
+    assert max(abs(a - b) for a, b in zip(left, right)) < 40  # one colour across the top row, not split left and right
+
+
 @pytest.mark.parametrize("data", [b"", b"not an image", b"\x89PNG\r\n\x1a\n" + b"0" * 10])
 def test_bad_keyframe_upload_writes_nothing(proj, data):
     p, _ = proj

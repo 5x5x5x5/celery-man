@@ -12,7 +12,7 @@ from pathlib import Path
 from celery_man import auto, features
 from celery_man.animate import SCENES, ChromiumRenderer, Renderer
 from celery_man.assemble import assemble, card_clip, still_clip
-from celery_man.compose import compose, prompt_sha
+from celery_man.compose import compose, prompt_sha_or_none
 from celery_man.generate import Generator, StillJob
 from celery_man.ledger import Ledger, cost, job_key
 from celery_man.project import DEFAULT_LOOK, OPEN, Brief, Project, Shot, open_shot, read_json, sha12, update_json, write_json
@@ -102,7 +102,12 @@ def kf_need(p: Project, shot: Shot, brief: Brief, entry: dict | None) -> str:
     """ "gen" (missing, stale or rejected), "judge" (approval pending) or "done". An uploaded keyframe stays done when the prompt moves."""
     if entry and entry.get("uploaded") and (p.root / entry["path"]).exists():
         return "done"
-    if not entry or entry["prompt_sha"] != prompt_sha(shot, brief) or entry["approved"] is False or not (p.root / entry["path"]).exists():
+    if (
+        not entry
+        or entry["prompt_sha"] != prompt_sha_or_none(shot, brief)
+        or entry["approved"] is False
+        or not (p.root / entry["path"]).exists()
+    ):
         return "gen"
     return "done" if entry["approved"] else "judge"
 

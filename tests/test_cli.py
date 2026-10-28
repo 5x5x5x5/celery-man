@@ -120,3 +120,16 @@ def test_cli_modes_per_shot(tmp_path, song):
     assert cli.main(["modes", str(d), "keyframes=auto", "s05.takes=auto"]) == 0
     assert Project(d).mode("keyframes") == "auto" and Project(d).mode("takes", "s05") == "auto"
     assert cli.main(["modes", str(d), "s05.brief=auto"]) == 2
+
+
+def test_serve_loads_the_tokenizer_before_serving(tmp_path, monkeypatch):
+    """The first compose() would otherwise fetch the tokenizer inside a request, freezing the event loop."""
+    import uvicorn
+
+    from celery_man import compose
+
+    calls = []
+    monkeypatch.setattr(compose, "count_tokens", lambda text: calls.append("tokenizer") or 1)
+    monkeypatch.setattr(uvicorn, "run", lambda app, host, port: calls.append(("serve", host)))
+    assert cli.main(["serve", str(tmp_path)]) == 0
+    assert calls == ["tokenizer", ("serve", "127.0.0.1")]

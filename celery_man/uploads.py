@@ -9,7 +9,7 @@ from dataclasses import asdict
 from PIL import Image, ImageOps
 
 from celery_man.assemble import probe_duration
-from celery_man.compose import prompt_sha
+from celery_man.compose import prompt_sha, prompt_sha_or_none
 from celery_man.generate import FPS, H, W
 from celery_man.project import Brief, Project, Shot, sha12
 from celery_man.steps import merge_entry
@@ -43,7 +43,7 @@ def import_keyframe(p: Project, sid: str, data: bytes) -> dict:
         with Image.open(io.BytesIO(data)) as im:
             if im.format not in ("PNG", "JPEG"):
                 raise UploadError("the image must be a PNG or JPEG")
-            out = ImageOps.fit(im.convert("RGB"), (W, H))
+            out = ImageOps.fit(ImageOps.exif_transpose(im).convert("RGB"), (W, H))
     except UploadError:
         raise
     except Exception as e:
@@ -97,4 +97,4 @@ def import_take(p: Project, sid: str, data: bytes, in_point: float = 0.0) -> dic
 
 def changed_since_upload(p: Project, shot: Shot, brief: Brief, entry: dict | None) -> bool:
     """An upload is pinned, never discarded; this only tells the UI the shot's prompt moved on after it."""
-    return bool(entry and entry.get("uploaded") and entry["prompt_sha"] != prompt_sha(shot, brief))
+    return bool(entry and entry.get("uploaded") and entry["prompt_sha"] != prompt_sha_or_none(shot, brief))

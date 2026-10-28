@@ -114,8 +114,10 @@ def _quick(a) -> int:
 def _serve(a) -> int:
     import uvicorn
 
+    from celery_man.compose import count_tokens
     from celery_man.web.app import create_app
 
+    count_tokens("")  # loads (first time: downloads) the tokenizer now, not inside the first request on the event loop
     # dir: one project folder, or a folder of project folders (where the page creates new ones)
     uvicorn.run(create_app(a.dir, make_generator, make_chats), host="127.0.0.1", port=a.port)
     return 0

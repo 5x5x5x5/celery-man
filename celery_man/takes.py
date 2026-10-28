@@ -1,4 +1,4 @@
-"""Takes: per-shot take plans (the 2-round lineage cap), the take batch runner, contact sheets and the takes step."""
+"""Takes: per-shot take plans (the 2-round lineage cap on auto shots), the take batch runner, contact sheets and the takes step."""
 
 import logging
 import os
@@ -70,18 +70,22 @@ def round_cap(p: Project, sid: str) -> int | None:
 
 
 def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | None, pick: dict | None) -> TakePlan:
-    """Next takes for a shot. The 2-round cap is per pick lineage ("gen", R5), read from the current gen's take rows:
+    """Next takes for a shot. The 2-round cap on auto shots is per pick lineage ("gen", R5), read from the current gen's take rows:
 
     - the current prompt+keyframe hash matches the latest round's rows and that round was not rejected: resume that round;
     - that round was rejected: next round of the same gen (any edit made after a rejection is the rewrite);
-      round 2 with an unchanged hash is "edit" (not_rewritten), past round 2 is "limit";
+      a later round with an unchanged hash is "edit" (not_rewritten), past an auto shot's round 2 is "limit";
     - otherwise the shot changed (brief, shot or keyframe edit) without a rejection: a fresh gen at round 1.
     """
     if pick and pick.get("uploaded") and pick_ok(p, led, pick, "", b""):
         return TakePlan("done")
     if kf_need(p, shot, brief, entry) != "done":
         return TakePlan("run", missing=len(SEEDS))
-    prompt, kf_path = compose(shot, brief), p.root / entry["path"]
+    try:
+        prompt = compose(shot, brief)
+    except ValueError:  # a pinned upload whose shot names left the brief: the shot needs an edit before any take
+        return TakePlan("edit")
+    kf_path = p.root / entry["path"]
     kf = kf_path.read_bytes()
     if pick_ok(p, led, pick, prompt, kf):
         return TakePlan("done")

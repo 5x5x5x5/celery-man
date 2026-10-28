@@ -55,3 +55,11 @@ def compose(shot: Shot, brief: Brief) -> str:
 
 def prompt_sha(shot: Shot, brief: Brief) -> str:
     return sha12(compose(shot, brief))
+
+
+def prompt_sha_or_none(shot: Shot, brief: Brief) -> str | None:
+    """None when the prompt cannot be built (a name the brief no longer has, or too long): the shot then counts as stale."""
+    try:
+        return prompt_sha(shot, brief)
+    except ValueError:
+        return None
