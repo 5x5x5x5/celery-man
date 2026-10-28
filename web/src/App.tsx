@@ -5,18 +5,20 @@ import { JobsBadge } from "./JobsBadge";
 import { SpendMeter } from "./SpendMeter";
 import { StepStrip } from "./StepStrip";
 import { Brief } from "./steps/Brief";
+import { Keyframes } from "./steps/Keyframes";
+import { Takes } from "./steps/Takes";
 import { Shots } from "./steps/Shots";
 import { NewProject, Song } from "./steps/Song";
 import { STEPS } from "./types";
 import type { Step } from "./types";
 import { useProject } from "./useProject";
 
-type Route = { pid: null } | { pid: string; step: Step };
+type Route = { pid: null } | { pid: string; step: Step; shot: string | null };
 
 export function parseRoute(hash: string): Route {
-  const m = /^#\/p\/([^/]+)(?:\/([^/]+))?$/.exec(hash);
+  const m = /^#\/p\/([^/?]+)(?:\/([^/?]+))?(?:\?(.*))?$/.exec(hash);
   if (!m) return { pid: null };
-  return { pid: decodeURIComponent(m[1]), step: (STEPS as readonly string[]).includes(m[2]) ? (m[2] as Step) : "song" };
+  return { pid: decodeURIComponent(m[1]), step: (STEPS as readonly string[]).includes(m[2]) ? (m[2] as Step) : "song", shot: new URLSearchParams(m[3] ?? "").get("shot") };
 }
 
 function Projects() {
@@ -41,7 +43,7 @@ function Projects() {
   );
 }
 
-function ProjectView({ pid, step }: { pid: string; step: Step }) {
+function ProjectView({ pid, step, shot }: { pid: string; step: Step; shot: string | null }) {
   const { state, error, refresh } = useProject(pid);
   return (
     <>
@@ -59,8 +61,10 @@ function ProjectView({ pid, step }: { pid: string; step: Step }) {
         {!state && !error && <p className="muted">Loading…</p>}
         {state && step === "song" && <Song state={state} refresh={refresh} />}
         {state && step === "brief" && <Brief state={state} refresh={refresh} />}
-        {state && step === "shots" && <Shots state={state} refresh={refresh} />}
-        {state && !["song", "brief", "shots"].includes(step) && <p className="muted">The {step} step is not built yet.</p>}
+        {state && step === "shots" && <Shots state={state} refresh={refresh} initial={shot} />}
+        {state && step === "keyframes" && <Keyframes state={state} refresh={refresh} initial={shot} />}
+        {state && step === "takes" && <Takes state={state} refresh={refresh} initial={shot} />}
+        {state && !["song", "brief", "shots", "keyframes", "takes"].includes(step) && <p className="muted">The {step} step is not built yet.</p>}
       </main>
     </>
   );
@@ -74,5 +78,5 @@ export function App() {
     return () => window.removeEventListener("hashchange", on);
   }, []);
   const r = parseRoute(hash);
-  return r.pid === null ? <Projects /> : <ProjectView key={r.pid} pid={r.pid} step={r.step} />;
+  return r.pid === null ? <Projects /> : <ProjectView key={r.pid} pid={r.pid} step={r.step} shot={r.shot} />;
 }

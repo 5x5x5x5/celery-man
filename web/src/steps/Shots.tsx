@@ -13,10 +13,11 @@ import type { Shot, ShotIdea, State, Templates } from "../types";
 
 const IDEAS = 3;
 
-export function Shots({ state, refresh }: { state: State; refresh: () => void }) {
+export function Shots({ state, refresh, initial }: { state: State; refresh: () => void; initial?: string | null }) {
   const { project: p, timing, brief, shots, prices } = state;
   const pid = p.id;
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>(initial ?? null);
+  useEffect(() => setSel(initial ?? null), [initial]);
   const [views, setViews] = useState<Record<string, View>>({});
   const [steer, setSteer] = useState("");
   const [draft, setDraft] = useState<{ shot: Shot; code?: string } | null>(null);
