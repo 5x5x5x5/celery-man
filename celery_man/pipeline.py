@@ -31,7 +31,6 @@ RUNNERS = {
 }
 MAX_PASSES = 20
 SPENDING = ("keyframes", "takes")
-PER_SHOT = ("shots", "render", "keyframes", "takes")  # waiting on some shots does not hold up the others
 
 
 class WaitingError(RuntimeError):
@@ -74,6 +73,7 @@ class StepState:
     step: str
     state: str  # done | stale | missing | waiting
     detail: str = ""
+    per_shot: bool = False  # waiting only on some shots' decisions: advance moves past it so the other shots go ahead
 
 
 def _decision(p: Project, step: str, fresh: bool | None) -> StepState:
@@ -84,13 +84,14 @@ def _decision(p: Project, step: str, fresh: bool | None) -> StepState:
 
 
 def _per_shot(p: Project, step: str, needs: dict[str, str], wait_on: set[str], have_file: bool) -> StepState:
-    """wait_on: needs only a person can clear on a tastemaker shot; "limit" waits in either mode (R6)."""
+    """wait_on: needs only a person can clear on a tastemaker shot; "limit" (R6) and "keyframe" (a pending tastemaker
+    keyframe) wait in either mode."""
     open_ = {sid: n for sid, n in needs.items() if n != "done"}
     detail = ", ".join(f"{sid}: pick a round-2 take" if n == "limit" else f"{sid} {n}" for sid, n in open_.items())
     if not open_:
         return StepState(step, "done")
-    if all(n == "limit" or (n in wait_on and p.mode(step, sid) == "tastemaker") for sid, n in open_.items()):
-        return StepState(step, "waiting", detail)
+    if all(n in ("limit", "keyframe") or (n in wait_on and p.mode(step, sid) == "tastemaker") for sid, n in open_.items()):
+        return StepState(step, "waiting", detail, per_shot=True)
     return StepState(step, "stale" if have_file else "missing", detail)
 
 
@@ -102,11 +103,12 @@ def _render(p: Project, brief: Brief, shots: list[Shot]) -> StepState:
     if not open_:
         return StepState("render", "done")
     if set(open_.values()) == {"failed"}:
-        return StepState("render", "waiting", "; ".join(f"{sid}: {(ren[sid]['error'].splitlines() or [''])[0]}" for sid in open_))
+        return StepState("render", "waiting", "; ".join(f"{sid}: {(ren[sid]['error'].splitlines() or [''])[0]}" for sid in open_), True)
     return StepState("render", "stale" if ren else "missing", ", ".join(f"{sid} {n}" for sid, n in open_.items()))
 
 
-def status(p: Project) -> list[StepState]:
+def status(p: Project, only: set[str] | None = None) -> list[StepState]:
+    """only: judge the per-shot steps over those shot ids alone (assemble still needs every shot)."""
     timing, brief_d = read_json(p.timing_path), read_json(p.brief_path)
     out = [StepState("timing", "missing" if timing is None else "done" if timing["song_sha"] == steps.song_sha(p) else "stale")]
     out.append(_decision(p, "brief", None if brief_d is None else brief_d["inputs"] == steps.brief_inputs(p)))
@@ -116,18 +118,26 @@ def status(p: Project) -> list[StepState]:
     shots = p.load_shots()
     mismatch = steps.shots_problem(p, shots) if fresh else ""
     if fresh and not mismatch and (open_ := [s.id for s in shots if s.is_open]):
-        auto_open = any(p.mode("shots", sid) == "auto" for sid in open_)
-        out.append(StepState("shots", "missing" if auto_open else "waiting", ", ".join(f"{sid} open" for sid in open_)))
+        mine = [sid for sid in open_ if only is None or sid in only]
+        state = "missing" if any(p.mode("shots", sid) == "auto" for sid in mine) else "waiting"
+        out.append(StepState("shots", state, ", ".join(f"{sid} open" for sid in open_), per_shot=True))
     else:
         out.append(_decision(p, "shots", fresh and not mismatch))
         out[-1].detail = mismatch or out[-1].detail
     if brief is None or not shots:
         return out + [StepState(s, "missing") for s in STEPS[3:]]
-    out.append(_render(p, brief, shots))
-    footage = [s for s in shots if s.kind == "footage"]
+    mine = [s for s in shots if only is None or s.id in only]
+    out.append(_render(p, brief, mine))
+    footage = [s for s in mine if s.kind == "footage"]
     kfs, picks, led = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}, Ledger(p.ledger_path)
-    out.append(_per_shot(p, "keyframes", {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in footage}, {"judge"}, bool(kfs)))
-    needs = {s.id: takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need for s in footage}
+    kf_needs = {s.id: steps.kf_need(p, s, brief, kfs.get(s.id)) for s in footage}
+    out.append(_per_shot(p, "keyframes", kf_needs, {"judge"}, bool(kfs)))
+    needs = {
+        s.id: "keyframe"
+        if kf_needs[s.id] == "judge" and p.mode("keyframes", s.id) == "tastemaker"
+        else takes.take_plan(p, led, s, brief, kfs.get(s.id), picks.get(s.id)).need
+        for s in footage
+    }
     out.append(_per_shot(p, "takes", needs, {"judge", "edit"}, p.picks_path.exists()))
     video = p.out_dir / "video.mp4"
     inputs = [f.stat().st_mtime for f in (p.picks_path, p.renders_path) if f.exists()]
@@ -236,24 +246,24 @@ def advance(
     with run_lock(p), run.stack:
         if p.timing_path.exists():
             steps.ensure_open_shots(p)
-        sts, checked = status(p), False
+        sts, checked = status(p, only), False
         for _ in range(MAX_PASSES):
-            i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.step in PER_SHOT)), None)
+            i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.per_shot)), None)
             if i is None or sts[i].state == "waiting":
-                return sts
-            if sts[i].step == "assemble" and any(s.state != "done" for s in sts[:i]):
-                return sts
+                return status(p)
+            if sts[i].step == "assemble" and any(s.state != "done" for s in status(p)[:i]):
+                return status(p)
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
                 checked = True
                 if confirm and not confirm(est := estimate(p)):
                     log.info("advance: stopped before spending ($%.2f declined)", est)
-                    return sts
+                    return status(p)
                 _preflight(p, run.led, quick_cost(p))
             RUNNERS[sts[i].step](run)
-            sts = status(p)
+            sts = status(p, only)
             # stop on failures instead of retrying (and re-billing) in the same call; an upstream step going stale is progress
             if sts[i].state not in ("done", "waiting") and all(s.state in ("done", "waiting") for s in sts[:i]):
                 log.warning("advance: %s did not finish: %s", sts[i].step, sts[i].detail)
-                return sts
+                return status(p)
     raise RuntimeError(f"advance did not settle after {MAX_PASSES} passes")

@@ -442,3 +442,31 @@ def test_concurrent_keyframe_write_survives(tmp_path, song):
     advance(p, ApprovingGen())
     kfs = read_json(p.keyframes_path)
     assert kfs["s02"]["approved"] is True and kfs["s01"]["approved"] is None
+
+
+def test_only_moves_its_shot_past_others_needs(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01", "s02"})
+    with_shot_modes(p, {"s01": {"keyframes": "auto"}})
+    advance(p, FakeGenerator(), chat_vision=vision_chat(), only={"s01"})
+    assert set(read_json(p.keyframes_path)) == {"s01"} and len(take_rows(p, "s01")) == 3
+    assert status_of(p, "keyframes").state == "stale"  # the full status still sees s02
+
+
+def test_stale_shots_file_stops_advance_before_spending(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01"})
+    write_json(p.shots_path, read_json(p.shots_path) | {"inputs": "bogus"})
+    with_shot_modes(p, {"s01": {"keyframes": "auto"}})
+    gen = CountingGen()
+    sts = advance(p, gen, chat_vision=vision_chat())
+    assert states(sts)["shots"] == "waiting" and gen.stills_n == gen.clips_n == []
+
+
+def test_takes_wait_on_a_pending_tastemaker_keyframe(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01"})
+    advance(p, FakeGenerator())
+    assert read_json(p.keyframes_path)["s01"]["approved"] is None
+    st = status_of(p, "takes")
+    assert st.state == "waiting" and "s01 keyframe" in st.detail

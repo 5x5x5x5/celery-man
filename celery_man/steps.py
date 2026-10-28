@@ -81,7 +81,12 @@ def ensure_open_shots(p: Project) -> None:
         "inputs": shots_inputs(p, brief) if brief else "",
         "shots": [asdict(open_shot(f"s{i:02d}", a, b, sec)) for i, (a, b, sec) in enumerate(windows(p), 1)],
     }
-    update_json(p, p.shots_path, lambda d: want if d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d)
+
+    def fill(d: dict | None) -> dict:
+        return want if d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d
+
+    if fill(d := read_json(p.shots_path)) != d:  # nothing is rewritten unchanged
+        update_json(p, p.shots_path, fill)
 
 
 def merge_entry(p: Project, path: Path, sid: str, entry: dict) -> None:

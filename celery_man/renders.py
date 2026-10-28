@@ -66,6 +66,6 @@ def run_render(run: Run) -> None:
     p = run.p
     features.ensure(p)
     brief, renders = p.load_brief(), read_json(p.renders_path) or {}
-    for s in p.load_animation():
+    for s in run.wanted(p.load_animation()):
         if render_need(p, s, brief.look, renders.get(s.id)) == "gen":
             render_shot(run, s, brief)
