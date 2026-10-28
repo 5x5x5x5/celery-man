@@ -31,6 +31,7 @@ RUNNERS = {
 }
 MAX_PASSES = 20
 SPENDING = ("keyframes", "takes")
+PER_SHOT = ("shots", "render", "keyframes", "takes")  # waiting on some shots does not hold up the others
 
 
 class WaitingError(RuntimeError):
@@ -83,12 +84,12 @@ def _decision(p: Project, step: str, fresh: bool | None) -> StepState:
 
 
 def _per_shot(p: Project, step: str, needs: dict[str, str], wait_on: set[str], have_file: bool) -> StepState:
-    """wait_on: needs only a person can clear in tastemaker mode; "limit" waits in either mode (R6)."""
+    """wait_on: needs only a person can clear on a tastemaker shot; "limit" waits in either mode (R6)."""
     open_ = {sid: n for sid, n in needs.items() if n != "done"}
     detail = ", ".join(f"{sid}: pick a round-2 take" if n == "limit" else f"{sid} {n}" for sid, n in open_.items())
     if not open_:
         return StepState(step, "done")
-    if set(open_.values()) <= ({"limit"} | (wait_on if p.modes[step] == "tastemaker" else set())):
+    if all(n == "limit" or (n in wait_on and p.mode(step, sid) == "tastemaker") for sid, n in open_.items()):
         return StepState(step, "waiting", detail)
     return StepState(step, "stale" if have_file else "missing", detail)
 
@@ -105,36 +106,21 @@ def _render(p: Project, brief: Brief, shots: list[Shot]) -> StepState:
     return StepState("render", "stale" if ren else "missing", ", ".join(f"{sid} {n}" for sid, n in open_.items()))
 
 
-def _window_mismatch(p: Project, shots: list[Shot]) -> str:
-    """The first way a (hand-edited) shots.json departs from the planned ids and windows, or ""."""
-    want = [(f"s{i:02d}", a, b) for i, (a, b, _) in enumerate(steps.windows(p), 1)]
-    if len(shots) != len(want):
-        return f"shots.json has {len(shots)} shots, the windows need {len(want)}"
-    for s, (sid, a, b) in zip(shots, want):
-        if (s.id, s.start, s.end) != (sid, a, b):
-            return f"{s.id} is {s.start:.2f}-{s.end:.2f}s, window {sid} is {a:.2f}-{b:.2f}s"
-    return ""
-
-
-def _kind_problem(p: Project, shots: list[Shot]) -> str:
-    """The first shot whose kind the project does not allow, or ""."""
-    for s in shots:
-        if s.kind not in p.kinds:
-            return f"{s.id} is {s.kind}; this project allows {', '.join(p.kinds)}"
-    return ""
-
-
 def status(p: Project) -> list[StepState]:
     timing, brief_d = read_json(p.timing_path), read_json(p.brief_path)
     out = [StepState("timing", "missing" if timing is None else "done" if timing["song_sha"] == steps.song_sha(p) else "stale")]
     out.append(_decision(p, "brief", None if brief_d is None else brief_d["inputs"] == steps.brief_inputs(p)))
     shots_d = read_json(p.shots_path)
     brief = p.load_brief()
-    fresh = None if shots_d is None or brief is None or timing is None else shots_d["inputs"] == steps.shots_inputs(p, brief)
+    fresh = None if shots_d is None or brief is None or timing is None else steps.shots_fresh(p, brief, shots_d)
     shots = p.load_shots()
-    mismatch = (_window_mismatch(p, shots) or _kind_problem(p, shots)) if fresh else ""
-    out.append(_decision(p, "shots", fresh and not mismatch))
-    out[-1].detail = mismatch or out[-1].detail
+    mismatch = steps.shots_problem(p, shots) if fresh else ""
+    if fresh and not mismatch and (open_ := [s.id for s in shots if s.is_open]):
+        auto_open = any(p.mode("shots", sid) == "auto" for sid in open_)
+        out.append(StepState("shots", "missing" if auto_open else "waiting", ", ".join(f"{sid} open" for sid in open_)))
+    else:
+        out.append(_decision(p, "shots", fresh and not mismatch))
+        out[-1].detail = mismatch or out[-1].detail
     if brief is None or not shots:
         return out + [StepState(s, "missing") for s in STEPS[3:]]
     out.append(_render(p, brief, shots))
@@ -240,15 +226,22 @@ def advance(
     chat_vision: ChatFn | None = None,
     confirm: Confirm | None = None,
     renderer: Renderer | None = None,
+    only: set[str] | None = None,
 ) -> list[StepState]:
-    """Run steps in order until everything is done, a tastemaker decision is missing, or a step cannot finish.
+    """Run steps in order until everything is done or waiting, a timing or brief decision is missing, or a step cannot finish.
+    A per-shot step waiting on some shots is passed over, so the other shots move ahead; assemble runs once all else is done.
+    only limits the per-shot runners to those shot ids.
     confirm gets the estimate once, at the first spending step (the brief and shots exist by then); False stops there."""
-    run = steps.Run(p, gen, chat_text, chat_vision, renderer)
+    run = steps.Run(p, gen, chat_text, chat_vision, renderer, only)
     with run_lock(p), run.stack:
+        if p.timing_path.exists():
+            steps.ensure_open_shots(p)
         sts, checked = status(p), False
         for _ in range(MAX_PASSES):
-            i = next((i for i, s in enumerate(sts) if s.state != "done"), None)
+            i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.step in PER_SHOT)), None)
             if i is None or sts[i].state == "waiting":
+                return sts
+            if sts[i].step == "assemble" and any(s.state != "done" for s in sts[:i]):
                 return sts
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING and not checked:  # once per call, before the first spend
@@ -260,7 +253,7 @@ def advance(
             RUNNERS[sts[i].step](run)
             sts = status(p)
             # stop on failures instead of retrying (and re-billing) in the same call; an upstream step going stale is progress
-            if sts[i].state not in ("done", "waiting") and all(s.state == "done" for s in sts[:i]):
+            if sts[i].state not in ("done", "waiting") and all(s.state in ("done", "waiting") for s in sts[:i]):
                 log.warning("advance: %s did not finish: %s", sts[i].step, sts[i].detail)
                 return sts
     raise RuntimeError(f"advance did not settle after {MAX_PASSES} passes")

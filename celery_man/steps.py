@@ -6,7 +6,7 @@ import os
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from celery_man import auto, features
@@ -15,7 +15,7 @@ from celery_man.assemble import assemble
 from celery_man.compose import compose, prompt_sha
 from celery_man.generate import Generator, StillJob
 from celery_man.ledger import Ledger, cost, job_key
-from celery_man.project import Brief, Project, Shot, read_json, sha12, write_json
+from celery_man.project import OPEN, Brief, Project, Shot, open_shot, read_json, sha12, update_json, write_json
 from celery_man.timing import detect, plan_windows
 
 log = logging.getLogger(__name__)
@@ -55,6 +55,40 @@ def shots_inputs(p: Project, brief: Brief) -> str:
     return sha12(parts if p.kinds == ["footage"] else [*parts, sorted(p.kinds)])
 
 
+def shots_fresh(p: Project, brief: Brief, d: dict) -> bool:
+    """A shots.json written before the brief existed (inputs "") is fresh while every shot in it is still open."""
+    return d["inputs"] == shots_inputs(p, brief) or (d["inputs"] == "" and all(s.get("kind") == OPEN for s in d["shots"]))
+
+
+def shots_problem(p: Project, shots: list[Shot]) -> str:
+    """The first way a (hand-edited) shots.json departs from the planned windows or the allowed kinds, or ""."""
+    want = [(f"s{i:02d}", a, b) for i, (a, b, _) in enumerate(windows(p), 1)]
+    if len(shots) != len(want):
+        return f"shots.json has {len(shots)} shots, the windows need {len(want)}"
+    for s, (sid, a, b) in zip(shots, want):
+        if (s.id, s.start, s.end) != (sid, a, b):
+            return f"{s.id} is {s.start:.2f}-{s.end:.2f}s, window {sid} is {a:.2f}-{b:.2f}s"
+    for s in shots:
+        if not s.is_open and s.kind not in p.kinds:
+            return f"{s.id} is {s.kind}; this project allows {', '.join(p.kinds)}"
+    return ""
+
+
+def ensure_open_shots(p: Project) -> None:
+    """While no shot is decided, shots.json holds one open shot per window, rewritten when the windows (or brief names) change."""
+    brief = p.load_brief()
+    want = {
+        "inputs": shots_inputs(p, brief) if brief else "",
+        "shots": [asdict(open_shot(f"s{i:02d}", a, b, sec)) for i, (a, b, sec) in enumerate(windows(p), 1)],
+    }
+    update_json(p, p.shots_path, lambda d: want if d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d)
+
+
+def merge_entry(p: Project, path: Path, sid: str, entry: dict) -> None:
+    """Write one shot's entry into a per-shot JSON map, keeping every other shot's entry as it is on disk now."""
+    update_json(p, path, lambda d: (d or {}) | {sid: entry})
+
+
 # --- per-shot needs --------------------------------------------------------------------------------
 
 
@@ -75,6 +109,7 @@ class Run:
     chat_text: auto.ChatFn | None = None
     chat_vision: auto.ChatFn | None = None
     renderer: Renderer | None = None
+    only: set[str] | None = None  # when set, the shots, render, keyframes and takes runners act only on these shot ids
     stack: ExitStack = field(default_factory=ExitStack)
     _open: bool = False
 
@@ -92,6 +127,9 @@ class Run:
         if self.renderer is None:
             self.renderer = ChromiumRenderer()
         return self.renderer
+
+    def wanted(self, shots: list[Shot]) -> list[Shot]:
+        return [s for s in shots if self.only is None or s.id in self.only]
 
     def chat(self, step: str, kind: str) -> auto.ChatFn:
         fn = self.chat_text if kind == "text" else self.chat_vision
@@ -126,6 +164,7 @@ def _write_bytes(dest: Path, data: bytes) -> None:
 def run_timing(run: Run) -> None:
     write_json(run.p.timing_path, detect(run.p.song))
     features.ensure(run.p)
+    ensure_open_shots(run.p)
 
 
 def run_brief(run: Run) -> None:
@@ -135,10 +174,24 @@ def run_brief(run: Run) -> None:
 def run_shots(run: Run) -> None:
     from celery_man import auto_scene  # auto_scene imports renders, which imports this module
 
-    brief, chat = run.p.load_brief(), run.chat("shots", "text")
-    shots, codes = auto.write_shots(chat, brief, windows(run.p), run.p.kinds)
-    shots = [auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s for s in shots]
-    run.p.save_shots(shots, shots_inputs(run.p, brief))
+    p = run.p
+    brief, d = p.load_brief(), read_json(p.shots_path)
+    if d is None or not shots_fresh(p, brief, d) or shots_problem(p, p.load_shots()):
+        chat = run.chat("shots", "text")
+        shots, codes = auto.write_shots(chat, brief, windows(p), p.kinds)
+        p.save_shots([auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s for s in shots], shots_inputs(p, brief))
+        return
+    todo = [s for s in run.wanted(p.load_shots()) if s.is_open and p.mode("shots", s.id) == "auto"]
+    if not todo:
+        return
+    chat = run.chat("shots", "text")
+    shots, codes = auto.write_shots(chat, brief, [(s.start, s.end, s.section) for s in todo], p.kinds, [s.id for s in todo])
+    new = {s.id: asdict(auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s) for s in shots}
+    stamp = shots_inputs(p, brief)
+    # only windows still open on disk are filled: a person may have decided one meanwhile
+    update_json(
+        p, p.shots_path, lambda d: {"inputs": stamp, "shots": [new.get(x["id"], x) if x["kind"] == OPEN else x for x in d["shots"]]}
+    )
 
 
 def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:
@@ -170,31 +223,29 @@ def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, app
                     "approved": approved,
                     "note": note,
                 }
-                write_json(p.keyframes_path, kfs)  # each still is recorded as it lands, so a kill keeps the finished ones
+                merge_entry(p, p.keyframes_path, s.id, kfs[s.id])  # each still is recorded as it lands, so a kill keeps the finished ones
     return failed
 
 
 def run_keyframes(run: Run) -> None:
     p = run.p
-    brief, shots, kfs = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}
-    auto_mode = p.modes["keyframes"] == "auto"
-    vision = run.chat("keyframes", "vision") if auto_mode else None
+    brief, shots, kfs = p.load_brief(), run.wanted(p.load_footage()), read_json(p.keyframes_path) or {}
+    auto_shots = [s for s in shots if p.mode("keyframes", s.id) == "auto"]
+    vision = run.chat("keyframes", "vision") if any(kf_need(p, s, brief, kfs.get(s.id)) != "done" for s in auto_shots) else None
     regen = [(s, kfs[s.id]["seed"] + 1 if s.id in kfs else 1) for s in shots if kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
     _stills(run, kfs, regen, brief, approved=None)
-    if not auto_mode:
-        return
-    for s in shots:
+    for s in auto_shots:
         if kf_need(p, s, brief, kfs.get(s.id)) != "judge":
             continue
         ok, why = auto.check_keyframe(vision, s, brief, p.root / kfs[s.id]["path"])
         if ok:
             kfs[s.id] |= {"approved": True, "note": why}
-            write_json(p.keyframes_path, kfs)
+            merge_entry(p, p.keyframes_path, s.id, kfs[s.id])
             continue
         log.info("keyframe %s rejected (%s); regenerating once and accepting", s.id, why)
         if _stills(run, kfs, [(s, kfs[s.id]["seed"] + 1)], brief, approved=True, note=f"accepted after a rejected first still: {why}"):
             kfs[s.id] |= {"approved": False, "note": why}  # the retry failed: the next advance regenerates
-            write_json(p.keyframes_path, kfs)
+            merge_entry(p, p.keyframes_path, s.id, kfs[s.id])
 
 
 def run_assemble(run: Run) -> None:

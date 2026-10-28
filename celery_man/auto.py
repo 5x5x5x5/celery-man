@@ -89,10 +89,11 @@ def write_brief(chat_fn: ChatFn, seed: str) -> Brief:
 
 
 def write_shots(
-    chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]], kinds: list[str]
+    chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]], kinds: list[str], ids: list[str] | None = None
 ) -> tuple[list[Shot], dict[str, str]]:
-    """The shots, and {shot id: code} for custom animation scenes (their scene file is not written here)."""
-    ids = [f"s{i:02d}" for i in range(1, len(windows) + 1)]
+    """The shots, and {shot id: code} for custom animation scenes (their scene file is not written here).
+    ids name the windows (default s01..sNN), so a subset of windows keeps its own ids."""
+    ids = ids or [f"s{i:02d}" for i in range(1, len(windows) + 1)]
     plan = [{"id": i, "start": w[0], "end": w[1], "section": w[2]} for i, w in zip(ids, windows)]
     if kinds == ["footage"]:
         system = (
