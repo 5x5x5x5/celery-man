@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { listProjects } from "./api";
+import { fileUrl, listProjects } from "./api";
+import { setSong } from "./clock";
 import { ContinueButton } from "./PricedButton";
 import { JobsBadge } from "./JobsBadge";
 import { SpendMeter } from "./SpendMeter";
@@ -48,6 +49,10 @@ function Projects() {
 
 function ProjectView({ pid, step, shot }: { pid: string; step: Step; shot: string | null }) {
   const { state, error, refresh } = useProject(pid);
+  const song = state?.project.song;
+  useEffect(() => {
+    if (song) setSong(fileUrl(pid, song));
+  }, [pid, song]);
   return (
     <TryInPlaceProvider>
       <header className="bar">

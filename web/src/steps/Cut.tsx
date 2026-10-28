@@ -1,37 +1,10 @@
 import { useState } from "react";
 import { assemble, fileUrl } from "../api";
 import { Player } from "../RoughCut";
-import type { ShotState, State, Step } from "../types";
-
-interface Look {
-  shot: string;
-  step: Step;
-  why: string;
-}
+import { needsLook } from "../roughcut";
+import type { ShotState, State } from "../types";
 
 const STEP_MODES = ["shots", "keyframes", "takes"] as const;
-
-/** Everything the next assemble would use that a person may want to look at again. */
-export function needsLook(state: State): Look[] {
-  const out: Look[] = [];
-  const own = (s: ShotState): Step => (s.shot.kind === "animation" ? "shots" : "takes");
-  for (const s of state.shots) {
-    const id = s.shot.id;
-    if (s.takes?.pick?.quick) out.push({ shot: id, step: "takes", why: "quick fallback take" });
-    if (s.shot.scene?.note?.startsWith("fallback:")) out.push({ shot: id, step: "shots", why: s.shot.scene.note });
-    const note = s.keyframe?.entry?.note;
-    if (typeof note === "string" && note.startsWith("accepted after")) out.push({ shot: id, step: "keyframes", why: note });
-    if (s.keyframe?.changed_since_upload) out.push({ shot: id, step: "keyframes", why: "changed since the still was uploaded" });
-    if (s.takes?.changed_since_upload) out.push({ shot: id, step: "takes", why: "changed since the clip was uploaded" });
-  }
-  for (const c of state.cut) {
-    if (c.kind === "still" || c.kind === "card" || c.kind === "blank") {
-      const s = state.shots.find((x) => x.shot.id === c.shot);
-      out.push({ shot: c.shot, step: s ? own(s) : "shots", why: `plays as a ${c.kind}` });
-    }
-  }
-  return out;
-}
 
 const Dots = ({ s }: { s?: ShotState }) =>
   s && (
@@ -78,7 +51,7 @@ export function Cut({ state, refresh }: { state: State; refresh: () => void }) {
         >
           Assemble draft
         </button>
-        <a href={fileUrl(pid, "out/video.mp4")} download>Download draft</a>
+        {state.steps.some((s) => s.step === "assemble" && s.state !== "missing") && <a href={fileUrl(pid, "out/video.mp4")} download>Download draft</a>}
         <a href={fileUrl(pid, "out/report.md")} target="_blank" rel="noreferrer">Report</a>
         <a href={fileUrl(pid, "PROVENANCE.md")} target="_blank" rel="noreferrer">Provenance</a>
       </div>

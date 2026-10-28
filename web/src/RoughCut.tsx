@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { fileUrl } from "./api";
-import { isPlaying, pause, playWindow, seek, setSong, useSongTime } from "./clock";
+import { isPlaying, pause, playWindow, seek, useSongTime } from "./clock";
 import { itemAt, withOverride } from "./roughcut";
 import { ScenePreview } from "./ScenePreview";
 import { useTryInPlace } from "./TryInPlace";
@@ -48,7 +48,6 @@ export function Player({ state, decided }: { state: State; decided?: (shot: stri
   const pid = state.project.id;
   const cut = withOverride(state.cut, override);
   const t = useSongTime();
-  useEffect(() => setSong(fileUrl(pid, state.project.song)), [pid, state.project.song]);
   const end = cut.length ? cut[cut.length - 1].end : 0;
   const here = itemAt(cut, t)?.item;
   return (
