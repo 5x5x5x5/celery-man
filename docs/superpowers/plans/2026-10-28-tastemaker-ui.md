@@ -84,21 +84,26 @@ def test_open_shot_round_trips():
     s = open_shot("s01", 0.0, 2.5, "intro")
     assert s.is_open and shot_from_dict(asdict(s)) == s
 
+
 def test_open_shot_rejects_content():
     with pytest.raises(ValueError):
         shot_from_dict(asdict(open_shot("s01", 0, 1, "x")) | {"action": "a person walks"})
+
 
 def test_mode_prefers_shot_override(tmp_path, song):
     p = Project.create(tmp_path / "p", song, "src")
     write_json(p.root / "project.json", p.config | {"shot_modes": {"s02": {"takes": "auto"}}})
     assert p.mode("takes") == "tastemaker" and p.mode("takes", "s02") == "auto" and p.mode("takes", "s03") == "tastemaker"
 
+
 def test_update_json_serialises_writers(tmp_path, song):
     p = Project.create(tmp_path / "p", song, "src")
     path = p.root / "k.json"
     threads = [threading.Thread(target=update_json, args=(p, path, lambda d, i=i: (d or {}) | {str(i): i})) for i in range(20)]
-    [t.start() for t in threads]; [t.join() for t in threads]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
     assert len(read_json(path)) == 20
+
 
 def test_cli_modes_per_shot(tmp_path, song):  # tests/test_cli.py
     # `celery-man modes DIR keyframes=auto s05.takes=auto`
@@ -147,8 +152,10 @@ def test_cli_modes_per_shot(tmp_path, song):  # tests/test_cli.py
 
 ```python
 def test_timing_writes_open_shots(tmp_path, song):
-    p = make(tmp_path, song, DEFAULT_MODES); advance(p, FakeGenerator())
+    p = make(tmp_path, song, DEFAULT_MODES)
+    advance(p, FakeGenerator())
     assert all(s.is_open for s in p.load_shots()) and len(p.load_shots()) == len(windows(p))
+
 
 def test_decided_shot_gets_keyframe_while_others_open(tmp_path, song):
     # brief saved; s01 decided as footage, the rest open; keyframes=auto for s01 only
@@ -156,16 +163,19 @@ def test_decided_shot_gets_keyframe_while_others_open(tmp_path, song):
     kfs = read_json(p.keyframes_path)
     assert set(kfs) == {"s01"} and status_of(p, "shots").state == "waiting"
 
+
 def test_auto_window_filled_tastemaker_left_open(tmp_path, song):
     # shot_modes {"s02": {"shots": "auto"}}, step mode tastemaker
     advance(p, FakeGenerator(), chat_text=text_chat)
     shots = {s.id: s for s in p.load_shots()}
     assert not shots["s02"].is_open and shots["s01"].is_open
 
+
 def test_only_limits_runners(tmp_path, song):
     # two decided footage shots, keyframes=tastemaker
     advance(p, FakeGenerator(), only={"s01"})  # new kwarg, passed to Run
     assert set(read_json(p.keyframes_path)) == {"s01"}
+
 
 def test_concurrent_keyframe_write_survives(tmp_path, song):
     # a FakeGenerator subclass whose stills() calls update_json(p, p.keyframes_path, approve "s02") mid-batch
@@ -199,9 +209,11 @@ def test_tastemaker_round_three_runs(tmp_path, song):
     # tastemaker shot rejected in rounds 1 and 2, shot edited after each rejection
     assert take_plan(...).need == "run" and take_plan(...).round == 3
 
+
 def test_auto_round_three_is_fallback(tmp_path, song):
     # same history with takes=auto for that shot
     assert take_plan(...).need in ("limit", "fallback")
+
 
 def test_unusable_round_two_tastemaker_rejected_not_quick(tmp_path, song):
     # round-2 takes all unreadable, tastemaker shot
@@ -242,15 +254,20 @@ def test_unusable_round_two_tastemaker_rejected_not_quick(tmp_path, song):
 
 ```python
 def test_check_refuses_risen_price(tmp_path, song):
-    with pytest.raises(PriceChanged) as e: spend.check(p, shown=0.10, now=0.12)
+    with pytest.raises(PriceChanged) as e:
+        spend.check(p, shown=0.10, now=0.12)
     assert e.value.price == 0.12
+
 
 def test_check_allows_cent_of_slack(tmp_path, song):
     spend.check(p, shown=0.10, now=0.105)
 
+
 def test_check_keeps_reserve(tmp_path, song):
     # cap set so that spent + now fits but spent + now + quick_cost does not
-    with pytest.raises(OverReserve): spend.check(p, shown=1.0, now=1.0)
+    with pytest.raises(OverReserve):
+        spend.check(p, shown=1.0, now=1.0)
+
 
 def test_estimate_only_counts_named_shots(tmp_path, song):
     assert estimate(p, only={"s01"}) < estimate(p)
@@ -299,21 +316,27 @@ def test_keyframe_upload_pinned_through_brief_edit(tmp_path, song):
     assert kf_need(p, shot, p.load_brief(), read_json(p.keyframes_path)["s01"]) == "done"
     assert changed_since_upload(p, shot, p.load_brief(), read_json(p.keyframes_path)["s01"])
 
+
 def test_keyframe_upload_is_960x544(tmp_path, song):
     e = import_keyframe(p, "s01", png_bytes(500, 500))
     assert Image.open(p.root / e["path"]).size == (960, 544)
 
+
 @pytest.mark.parametrize("data", [b"", b"not an image", b"\x89PNG\r\n\x1a\n" + b"0" * 10])
 def test_bad_keyframe_upload_writes_nothing(tmp_path, song, data):
-    with pytest.raises(UploadError): import_keyframe(p, "s01", data)
+    with pytest.raises(UploadError):
+        import_keyframe(p, "s01", data)
     assert not p.keyframes_path.exists() and not any(p.keys_dir.glob("*")) if p.keys_dir.exists() else True
+
 
 def test_take_upload_without_keyframe_is_done(tmp_path, song):
     import_take(p, "s01", mp4_bytes(seconds=5))
     assert take_plan(p, Ledger(p.ledger_path), shot, brief, None, read_json(p.picks_path)["s01"]).need == "done"
 
+
 def test_short_take_upload_refused(tmp_path, song):
-    with pytest.raises(UploadError, match="needs"): import_take(p, "s01", mp4_bytes(seconds=1), in_point=0.5)
+    with pytest.raises(UploadError, match="needs"):
+        import_take(p, "s01", mp4_bytes(seconds=1), in_point=0.5)
     assert not p.picks_path.exists()
 ```
 
@@ -359,13 +382,16 @@ def test_cut_plan_kinds(tmp_path, song):
     # s01 picked take, s02 animation rendered, s03 approved still only, s04 decided no keyframe, s05 open
     assert [c["kind"] for c in cut_plan(p)][:5] == ["take", "render", "still", "card", "blank"]
 
+
 def test_assemble_with_gaps_makes_full_length_video(tmp_path, song):
     run_assemble(Run(p, FakeGenerator()))
     assert abs(probe_duration(p.out_dir / "video.mp4") - (windows(p)[-1][1] - windows(p)[0][0])) < 0.1
 
+
 def test_card_text_with_quotes_and_colons(tmp_path):
     card_clip("a: 'b' \"c\" 50%", DEFAULT_LOOK, 1.0, tmp_path / "c.mp4")
     assert probe_duration(tmp_path / "c.mp4") >= 1.0
+
 
 def test_stale_pick_falls_back_to_still(tmp_path, song):
     # pick made, then shot action edited and keyframe re-approved
@@ -421,11 +447,15 @@ def test_stale_pick_falls_back_to_still(tmp_path, song):
 ```python
 def test_write_shots_unchanged_after_refactor(): ...  # the existing test_auto write_shots tests still pass untouched
 
-def test_suggest_briefs_three(): assert len(auto.suggest_briefs(fake_chat(three_briefs), "", "")) == 3
+
+def test_suggest_briefs_three():
+    assert len(auto.suggest_briefs(fake_chat(three_briefs), "", "")) == 3
+
 
 def test_suggest_shots_mixed_kinds(tmp_path, song):
     ideas = auto.suggest_shots(fake_chat(mixed), brief, "s03", w, ["footage", "animation"], [], "")
     assert {s.kind for s, _ in ideas} == {"footage", "animation"} and all(s.id == "s03" for s, _ in ideas)
+
 
 def test_shot_suggestions_get_paid_stills(tmp_path, song):
     suggest.shots(Run(p, FakeGenerator(), text_chat=fake_chat(mixed)), "s03", "")
@@ -433,18 +463,23 @@ def test_shot_suggestions_get_paid_stills(tmp_path, song):
     assert all((i["still"] is not None) == (i["shot"]["kind"] == "footage") for i in items)
     assert sum(r["model"] == STILL_MODEL for r in Ledger(p.ledger_path).rows()) == sum(i["shot"]["kind"] == "footage" for i in items)
 
+
 def test_keyframe_suggestions_four_new_seeds(tmp_path, song):
-    suggest.keyframes(run, "s01"); suggest.keyframes(run, "s01")
+    suggest.keyframes(run, "s01")
+    suggest.keyframes(run, "s01")
     seeds = [i["seed"] for i in read_json(p.root / "candidates/keyframes/s01.json")["items"]]
     assert len(seeds) == 8 and len(set(seeds)) == 8
+
 
 def test_use_keyframe_approves(tmp_path, song):
     suggest.use_keyframe(p, "s01", cid)
     assert read_json(p.keyframes_path)["s01"]["approved"] is True
 
+
 def test_suggestions_never_touch_decisions(tmp_path, song):
     before = {f: f.read_bytes() for f in [p.shots_path, p.brief_path] if f.exists()}
-    suggest.briefs(run, ""); suggest.shots(run, "s02", "")
+    suggest.briefs(run, "")
+    suggest.shots(run, "s02", "")
     assert before == {f: f.read_bytes() for f in before}
 ```
 
@@ -518,16 +553,24 @@ def test_lists_folder_of_projects(tmp_path, song): ...  # two projects → two i
 def test_single_project_folder_served(tmp_path, song): ...  # id == folder name
 def test_create_project_runs_timing(tmp_path, song):
     r = c.post("/api/projects", data={"name": "one", "source": "s", "kinds": "footage,animation"}, files={"song": song.open("rb")})
-    wait_jobs(c, "one"); st = c.get("/api/projects/one/state").json()
+    wait_jobs(c, "one")
+    st = c.get("/api/projects/one/state").json()
     assert st["timing"]["windows"] and all(s["open"] for s in st["shots"])
+
+
 def test_create_rejects_non_audio(tmp_path): ...  # files={"song": ("a.mp3", b"text")} → 422, no folder left behind
 def test_create_rejects_bad_name(tmp_path, song): ...  # name "../x" → 422
 def test_range_change_with_decided_shots_refused(tmp_path, song):
     assert c.patch(u, json={"range": [0, 8]}).status_code == 409
     assert c.patch(u, json={"range": [0, 8], "reset_shots": True}).status_code == 200
+
+
 def test_cross_site_post_refused(tmp_path, song): ...  # Origin http://evil.example → 403
 def test_job_error_recorded_and_worker_survives(tmp_path, song): ...  # failing paid job, then a good one runs
-def test_state_shape_keys(tmp_path, song): assert set(st) == {"project","timing","brief","shots","steps","spend","prices","candidates","jobs","cut"}
+def test_state_shape_keys(tmp_path, song):
+    assert set(st) == {"project", "timing", "brief", "shots", "steps", "spend", "prices", "candidates", "jobs", "cut"}
+
+
 def test_files_blocks_traversal(tmp_path, song): ...  # /files/../x → 404
 ```
 
