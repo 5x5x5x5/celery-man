@@ -1,5 +1,6 @@
 """Every tastemaker decision and every paid action under /api/projects/{pid}. Paid routes re-check the price the UI showed."""
 
+import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import asdict
@@ -76,9 +77,25 @@ def _brief(p: Project):
     return b
 
 
-def _save_shot(p: Project, sid: str, d, expect: Shot | None = None) -> bool:
+MAX_CODE = 200_000
+
+
+def _code(body: dict) -> str | None:
+    c = _get(body, "code", str, None)
+    if c is not None and not 0 < len(c) <= MAX_CODE:
+        raise ValueError(f"code: expected 1 to {MAX_CODE} characters")
+    return c
+
+
+def _save_shot(p: Project, sid: str, d, expect: Shot | None = None, code: str | None = None) -> bool:
     """A tastemaker's edit to one shot: same id and window, a kind the project makes, a prompt that fits.
     expect: write only while the shot on disk is still this one; returns whether it was written."""
+    if code is not None:
+        if not isinstance(d, dict) or d.get("kind") != "animation":
+            raise ValueError("code: only animation shots have scene code")
+        # content-addressed, so the render key changes with the code
+        name = f"scenes/{sid}-{hashlib.sha256(code.encode()).hexdigest()[:8]}.js"
+        d = d | {"scene": {"file": name, "params": (d.get("scene") or {}).get("params", {})}}
     new, now, brief = shot_from_dict(d), _shot(p, sid), _brief(p)
     if (new.id, new.start, new.end, new.section) != (now.id, now.start, now.end, now.section):
         raise ValueError(f"{sid}: the shot id and window cannot change")
@@ -87,6 +104,9 @@ def _save_shot(p: Project, sid: str, d, expect: Shot | None = None) -> bool:
     if new.kind == "footage":
         compose(new, brief)  # PromptTooLong or an unknown name reaches the user
     stamp, wrote = shots_inputs(p, brief), []
+    if code is not None:  # only after validation passed
+        (p.root / new.scene["file"]).parent.mkdir(exist_ok=True)
+        (p.root / new.scene["file"]).write_text(code)
 
     def put(x: dict) -> dict:
         if expect is not None and next(s for s in x["shots"] if s["id"] == sid) != asdict(expect):
@@ -168,8 +188,19 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
     @r.put("/shots/{sid}")
     async def put_shot(pid: str, sid: str, request: Request) -> dict:
         p, _ = get(pid)
-        _save_shot(p, sid, _get(await _body(request), "shot", dict))
+        b = await _body(request)
+        _save_shot(p, sid, _get(b, "shot", dict), code=_code(b))
         return {}
+
+    @r.post("/preview")
+    async def preview_code(pid: str, request: Request) -> HTMLResponse:
+        """Unsaved scene text, for the code editor."""
+        p, _ = get(pid)
+        b = await _body(request)
+        code = _code(b)
+        if code is None:
+            raise ValueError("code: required")
+        return HTMLResponse(preview_html(code, _get(b, "params", dict, {}), _brief(p).look, 1))
 
     @r.post("/suggest/shots")
     async def suggest_shots(pid: str, request: Request):

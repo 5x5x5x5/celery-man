@@ -128,8 +128,8 @@ export function Shots({ state, refresh }: { state: State; refresh: () => void })
               brief={brief}
               kinds={p.kinds}
               templates={templates}
-              onSave={async (s) => {
-                await putShot(pid, s.id, s);
+              onSave={async (s, c) => {
+                await putShot(pid, s.id, s, c);
                 setDraft(null);
                 refresh();
               }}

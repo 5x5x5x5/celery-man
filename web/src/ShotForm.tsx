@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SceneEditor } from "./SceneEditor";
 import { KINDS } from "./types";
 import type { Brief, Kind, ParamSpec, Shot, Templates } from "./types";
@@ -8,6 +8,12 @@ const FIELDS = ["kind", "action", "cast", "place", "framing", "scene"];
 const fieldOf = (msg: string) => FIELDS.find((f) => new RegExp(`^${f}\\b`).test(msg));
 
 const defaults = (specs: Record<string, ParamSpec>) => Object.fromEntries(Object.entries(specs).map(([k, s]) => [k, s.default]));
+
+/** An animation shot always has a scene: the first template with its default params. */
+function withScene(d: Shot, templates: Templates): Shot {
+  const first = Object.keys(templates)[0];
+  return d.kind === "animation" && !d.scene && first ? { ...d, scene: { template: first, params: defaults(templates[first].params) } } : d;
+}
 
 function Param({ name, spec, value, onChange }: { name: string; spec: ParamSpec; value: unknown; onChange: (v: unknown) => void }) {
   const label = `${name}${spec.doc ? ` (${spec.doc})` : ""}`;
@@ -30,25 +36,27 @@ export function ShotForm({ pid, shot, brief, kinds, templates, code, onSave }: {
   kinds: Kind[];
   templates: Templates;
   code?: string;
-  onSave: (s: Shot) => Promise<void>;
+  onSave: (s: Shot, code?: string) => Promise<void>;
 }) {
   const open = shot.kind === "open";
-  const [d, setD] = useState<Shot>({ ...shot, kind: open ? kinds[0] : shot.kind });
+  const [d, setD] = useState<Shot>(() => withScene({ ...shot, kind: open ? kinds[0] : shot.kind }, templates));
+  const [codeText, setCodeText] = useState(code ?? "");
+  // the catalogue may arrive after the form
+  useEffect(() => setD((x) => withScene(x, templates)), [templates]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const names = Object.keys(templates);
   const scene = d.scene;
   const usesCode = !!scene && !scene.template;
 
-  const setKind = (k: Kind) =>
-    setD({ ...d, kind: k, scene: k === "footage" ? null : d.scene ?? (names[0] ? { template: names[0], params: defaults(templates[names[0]].params) } : null) });
+  const setKind = (k: Kind) => setD(withScene({ ...d, kind: k, scene: k === "footage" ? null : d.scene }, templates));
   const setTemplate = (t: string) => setD({ ...d, scene: { template: t, params: defaults(templates[t].params) } });
 
   const save = async () => {
     setBusy(true);
     setError("");
     try {
-      await onSave(d);
+      await onSave(d, usesCode && codeText ? codeText : undefined);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -108,7 +116,7 @@ export function ShotForm({ pid, shot, brief, kinds, templates, code, onSave }: {
           {usesCode && (
             <>
               <label className="field"><span>Scene file</span><input type="text" value={scene.file ?? ""} onChange={(e) => setD({ ...d, scene: { ...scene, file: e.target.value } })} /></label>
-              <SceneEditor pid={pid} shot={d} code={code} />
+              <SceneEditor pid={pid} shot={d} text={codeText} onText={setCodeText} />
             </>
           )}
           {err("scene")}

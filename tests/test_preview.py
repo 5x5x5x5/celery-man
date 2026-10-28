@@ -80,3 +80,11 @@ def test_preview_draws_and_fetch_blocked():
         b.close()
     assert red == 255
     assert any(m["type"] == "error" and "blocked" in m["message"] for m in msgs), msgs
+
+
+def test_preview_post_unsaved_code(tmp_path, song):
+    c = client(decided(tmp_path, song).root)
+    r = c.post(f"{U}/preview", json={"code": "window.mark='zz9'", "params": {}})
+    assert r.status_code == 200 and "zz9" in r.text and CSP in r.text
+    assert c.post(f"{U}/preview", json={"params": {}}).status_code == 422
+    assert c.post(f"{U}/preview", json={"code": "x" * 200_001}).status_code == 422

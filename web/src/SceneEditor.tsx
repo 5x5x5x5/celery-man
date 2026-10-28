@@ -1,21 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fileUrl } from "./api";
 import { ScenePreview } from "./ScenePreview";
 import type { Shot } from "./types";
 
-/** Scene code beside a live preview of the saved scene. shortcut: the API has no route to save code, so edits are
- * read-and-try text only; add a PUT for scene files when saving code is wanted. */
-export function SceneEditor({ pid, shot, code }: { pid: string; shot: Shot; code?: string }) {
+const DEBOUNCE_MS = 400;
+
+/** Scene code beside a live preview of the typed text; the parent saves it. */
+export function SceneEditor({ pid, shot, text, onText }: { pid: string; shot: Shot; text: string; onText: (t: string) => void }) {
   const file = shot.scene?.file;
-  const [text, setText] = useState(code ?? "");
+  const [shown, setShown] = useState(text);
+  const latest = useRef(text);
+  latest.current = text;
   useEffect(() => {
-    if (code !== undefined || !file) return;
-    fetch(fileUrl(pid, file)).then((r) => (r.ok ? r.text() : "")).then(setText, () => {});
-  }, [pid, file, code]);
+    if (text || !file) return;
+    fetch(fileUrl(pid, file)).then((r) => (r.ok ? r.text() : "")).then((t) => latest.current || onText(t), () => {}); // never over typed text
+  }, [pid, file]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const id = setTimeout(() => setShown(text), DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [text]);
   return (
     <div>
-      <textarea className="code" aria-label="Scene code" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
-      <ScenePreview pid={pid} sid={shot.id} start={shot.start} end={shot.end} />
+      <textarea className="code" aria-label="Scene code" value={text} onChange={(e) => onText(e.target.value)} spellCheck={false} />
+      {shown && <ScenePreview pid={pid} source={{ code: shown, params: shot.scene?.params ?? {} }} start={shot.start} end={shot.end} />}
     </div>
   );
 }

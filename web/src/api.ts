@@ -73,7 +73,8 @@ export const putBrief = (pid: string, brief: Brief) => json<object>("PUT", `${ba
 export const suggestBrief = (pid: string, steer = "") => json<{ job: string }>("POST", `${base(pid)}/suggest/brief`, { steer });
 export const useBrief = (pid: string, id: string) => json<object>("POST", `${base(pid)}/brief/use`, { id });
 
-export const putShot = (pid: string, sid: string, shot: Shot) => json<object>("PUT", `${base(pid)}/shots/${sid}`, { shot });
+export const putShot = (pid: string, sid: string, shot: Shot, code?: string) =>
+  json<object>("PUT", `${base(pid)}/shots/${sid}`, code ? { shot, code } : { shot });
 export const suggestShots = (pid: string, shots: string[], steer: string, price: number) =>
   paid(`${base(pid)}/suggest/shots`, { shots, steer, price });
 export const useShot = (pid: string, sid: string, id: string) => json<object>("POST", `${base(pid)}/shots/${sid}/use`, { id });
@@ -110,3 +111,9 @@ export const previewUrl = (pid: string, sid: string, candidate?: string) =>
 export const getFrames = (pid: string, start: number, end: number) =>
   json<unknown[]>("GET", `${base(pid)}/frames?start=${start}&end=${end}`);
 export const getTemplates = () => json<Templates>("GET", "/api/templates");
+/** Unsaved scene text rendered as a preview page. */
+export async function previewCode(pid: string, code: string, params: Record<string, unknown>): Promise<string> {
+  const r = await call("POST", `${base(pid)}/preview`, { code, params });
+  if (!r.ok) await fail(r);
+  return r.text();
+}

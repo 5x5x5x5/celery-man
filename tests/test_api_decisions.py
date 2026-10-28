@@ -1,3 +1,4 @@
+import re
 import json
 import threading
 
@@ -275,3 +276,19 @@ def test_continue_only_must_be_ids(tmp_path, song):
 def test_templates_catalogue_served(tmp_path, song):
     cat = client(decided(tmp_path, song).root).get("/api/templates").json()
     assert cat["bars"]["params"]["count"]["type"] == "integer"
+
+
+def test_put_shot_code_written_after_validation(tmp_path, song):
+    p = decided(tmp_path, song)
+    write_json(p.root / "project.json", p.config | {"kinds": ["footage", "animation"]})
+    c = client(p.root)
+    anim = shot(c) | {"kind": "animation", "scene": {"template": "rings", "params": {}}}
+    assert c.put(f"{U}/shots/s01", json={"shot": shot(c), "code": "x"}).status_code == 422  # footage
+    assert c.put(f"{U}/shots/s01", json={"shot": anim, "code": ""}).status_code == 422
+    assert c.put(f"{U}/shots/s01", json={"shot": anim, "code": "x" * 200_001}).status_code == 422
+    assert not (p.root / "scenes").exists()
+    assert c.put(f"{U}/shots/s01", json={"shot": anim | {"end": 9}, "code": "draw()"}).status_code == 422  # invalid shot
+    assert not (p.root / "scenes").exists()
+    assert c.put(f"{U}/shots/s01", json={"shot": anim, "code": "draw()"}).status_code == 200
+    f = p.load_shots()[0].scene["file"]
+    assert re.fullmatch(r"scenes/s01-[0-9a-f]{8}\.js", f) and (p.root / f).read_text() == "draw()"

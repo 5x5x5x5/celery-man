@@ -1,30 +1,40 @@
 import { useEffect, useRef, useState } from "react";
-import { getFrames, previewUrl } from "./api";
+import { getFrames, previewCode, previewUrl } from "./api";
 import { frameIndex, useSongTime } from "./clock";
 
 const SIZE = { width: 960, height: 544, fps: 24 };
 
-export function ScenePreview({ pid, sid, candidate, start, end }: { pid: string; sid?: string; candidate?: string; start: number; end: number }) {
+/** `source` previews unsaved text (POST) instead of a saved shot or candidate. */
+export function ScenePreview({ pid, sid, candidate, source, start, end }: {
+  pid: string;
+  sid?: string;
+  candidate?: string;
+  source?: { code: string; params: Record<string, unknown> };
+  start: number;
+  end: number;
+}) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [doc, setDoc] = useState<string>();
   const [error, setError] = useState("");
   const [frames, setFrames] = useState<Record<string, unknown>[]>([]);
   const [ready, setReady] = useState(false); // the scene has finished its async setup
+  const sourceKey = source ? JSON.stringify(source) : "";
   const t = useSongTime();
 
   useEffect(() => {
-    if (!sid) return;
+    if (!sid && !source) return;
     let alive = true;
     setError("");
     setDoc(undefined);
-    fetch(previewUrl(pid, sid, candidate))
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`preview ${r.status}`))))
-      .then((h) => alive && setDoc(h), (e) => alive && setError(String(e.message ?? e)));
+    (source
+      ? previewCode(pid, source.code, source.params)
+      : fetch(previewUrl(pid, sid!, candidate)).then((r) => (r.ok ? r.text() : Promise.reject(new Error(`preview ${r.status}`))))
+    ).then((h) => alive && setDoc(h), (e) => alive && setError(String(e.message ?? e)));
     getFrames(pid, start, end).then((f) => alive && setFrames(f as Record<string, unknown>[]), (e) => alive && setError(String(e.message ?? e)));
     return () => {
       alive = false;
     };
-  }, [pid, sid, candidate, start, end]);
+  }, [pid, sid, candidate, sourceKey, start, end]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => setReady(false), [doc]);
 
