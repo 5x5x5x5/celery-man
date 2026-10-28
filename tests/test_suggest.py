@@ -149,3 +149,31 @@ def test_suggestions_never_touch_decisions(tmp_path, song):
     run.chat_text = fake_chat(MIXED)
     suggest.shots(run, "s02", "")
     assert before == {f: f.read_bytes() for f in before} and not p.keyframes_path.exists()
+
+
+def test_failed_vision_check_keeps_paid_stills(tmp_path, song):
+    p = setup(tmp_path, song)
+    decide_footage(p)
+    write_json(p.root / "project.json", p.config | {"vision_flags": True})
+    suggest.keyframes(Run(p, FakeGenerator(), chat_vision=lambda s, u, i: "no json"), "s01")
+    assert [i["flag"] for i in read_json(p.root / "candidates/keyframes/s01.json")["items"]] == [None] * 4
+
+
+def test_variations_twice_never_repeat_seeds(tmp_path, song):
+    p = setup(tmp_path, song)
+    decide_footage(p)
+    run = Run(p, FakeGenerator())
+    suggest.keyframes(run, "s01", near_seed=1)
+    suggest.keyframes(run, "s01", near_seed=1)
+    suggest.keyframes(run, "s01")
+    seeds = [i["seed"] for i in read_json(p.root / "candidates/keyframes/s01.json")["items"]]
+    assert seeds[:8] == [11, 12, 13, 14, 15, 16, 17, 18] and len(set(seeds)) == 12
+
+
+def test_reasked_shot_ideas_never_repeat_still_jobs(tmp_path, song):
+    p = setup(tmp_path, song)
+    run = Run(p, FakeGenerator(), chat_text=fake_chat(MIXED))
+    suggest.shots(run, "s03", "")
+    suggest.shots(run, "s03", "")
+    jobs = [(r["prompt"], r["seed"]) for r in Ledger(p.ledger_path).rows() if r.get("model") == STILL_MODEL]
+    assert len(jobs) == 4 and len(set(jobs)) == 4

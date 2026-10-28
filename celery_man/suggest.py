@@ -1,5 +1,6 @@
 """Model suggestions kept as candidates under candidates/, outside the decision files, until the tastemaker uses one."""
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from celery_man.compose import PromptTooLong, compose
 from celery_man.project import Project, Shot, brief_from_dict, read_json, sha12, shot_from_dict, update_json
 from celery_man.steps import STILL_MODEL, Run, brief_inputs, gen_stills, merge_entry, shots_inputs
 
+log = logging.getLogger(__name__)
 KEYFRAME_SUGGESTIONS = 4
 
 
@@ -40,6 +42,18 @@ def _shot(p: Project, sid: str) -> Shot:
     raise KeyError(f"no shot {sid}")
 
 
+def _seeds(run: Run, sid: str, n: int, after: int | None = None) -> list[int]:
+    """n still seeds above after (default: the highest the shot has used) that the shot has never used, so nothing is paid twice."""
+    rows = run.led.rows()
+    used = {r["seed"] for r in rows if r.get("kind") == "job" and r.get("shot") == sid and r.get("model") == STILL_MODEL}
+    seed, out = max(used, default=0) if after is None else after, []
+    while len(out) < n:
+        seed += 1
+        if seed not in used:
+            out.append(seed)
+    return out
+
+
 def briefs(run: Run, steer: str) -> None:
     p = run.p
     found = auto.suggest_briefs(run.chat("brief", "text"), p.config["seed"], steer)
@@ -56,28 +70,26 @@ def shots(run: Run, sid: str, steer: str) -> None:
     note = (read_json(path) or {}).get("note", "")
     ideas = auto.suggest_shots(run.chat("shots", "text"), brief, sid, (me.start, me.end, me.section), p.kinds, neighbours, steer or note)
     items = [{"shot": asdict(s), "code": code, "still": None, "error": None} for s, code in ideas]
-    jobs, which = [], []
+    prompts = {}
     for n, (s, _) in enumerate(ideas):
         if s.kind != "footage":
             continue
         try:
-            jobs.append((sid, compose(s, brief), n + 1))
-            which.append(n)
+            prompts[n] = compose(s, brief)
         except PromptTooLong as e:
             items[n]["error"] = str(e)
-    for n, still in zip(which, gen_stills(run, jobs)):
+    jobs = [(sid, pr, seed) for pr, seed in zip(prompts.values(), _seeds(run, sid, len(prompts)))]
+    for n, still in zip(prompts, gen_stills(run, jobs)):
         items[n] |= {"still": str(still.relative_to(p.root))} if still else {"error": "the still failed"}
     _add(p, path, [_with_id(i) for i in items], steer=steer, note=note)
 
 
 def keyframes(run: Run, sid: str, near_seed: int | None = None) -> None:
-    """Four paid stills on new seeds after the highest the shot has used, or on near_seed * 10 + 1.. for Variations."""
+    """Four paid stills on seeds the shot has never used: after the highest so far, or from near_seed * 10 + 1 for Variations."""
     p, path = run.p, _path(run.p, "keyframes", sid)
     shot, brief = _shot(p, sid), p.load_brief()
     prompt = compose(shot, brief)
-    used = [r["seed"] for r in run.led.rows() if r.get("kind") == "job" and r.get("shot") == sid and r.get("model") == STILL_MODEL]
-    base = near_seed * 10 if near_seed is not None else max(used, default=0)
-    jobs = [(sid, prompt, base + k) for k in range(1, KEYFRAME_SUGGESTIONS + 1)]
+    jobs = [(sid, prompt, seed) for seed in _seeds(run, sid, KEYFRAME_SUGGESTIONS, None if near_seed is None else near_seed * 10)]
     vision = run.chat("keyframes", "vision") if p.config.get("vision_flags") else None
     items = []
     for (_, _, seed), still in zip(jobs, gen_stills(run, jobs)):
@@ -85,8 +97,11 @@ def keyframes(run: Run, sid: str, near_seed: int | None = None) -> None:
             continue
         flag = None
         if vision:
-            ok, why = auto.check_keyframe(vision, shot, brief, still)
-            flag = None if ok else why
+            try:
+                ok, why = auto.check_keyframe(vision, shot, brief, still)
+                flag = None if ok else why
+            except auto.AutoError as e:  # the stills are paid for: keep them unflagged rather than lose them
+                log.warning("%s: no flag for %s (%s)", sid, still.name, e)
         items.append(_with_id({"path": str(still.relative_to(p.root)), "seed": seed, "prompt_sha": sha12(prompt), "flag": flag}))
     _add(p, path, items)
 
