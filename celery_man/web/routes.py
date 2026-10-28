@@ -74,8 +74,9 @@ def _brief(p: Project):
     return b
 
 
-def _save_shot(p: Project, sid: str, d) -> None:
-    """A tastemaker's edit to one shot: same id and window, a kind the project makes, a prompt that fits."""
+def _save_shot(p: Project, sid: str, d, expect: Shot | None = None) -> bool:
+    """A tastemaker's edit to one shot: same id and window, a kind the project makes, a prompt that fits.
+    expect: write only while the shot on disk is still this one; returns whether it was written."""
     new, now, brief = shot_from_dict(d), _shot(p, sid), _brief(p)
     if (new.id, new.start, new.end, new.section) != (now.id, now.start, now.end, now.section):
         raise ValueError(f"{sid}: the shot id and window cannot change")
@@ -83,8 +84,16 @@ def _save_shot(p: Project, sid: str, d) -> None:
         raise ValueError(f"kind: this project makes {', '.join(p.kinds)}")
     if new.kind == "footage":
         compose(new, brief)  # PromptTooLong or an unknown name reaches the user
-    stamp = shots_inputs(p, brief)
-    update_json(p, p.shots_path, lambda x: x | {"inputs": stamp, "shots": [asdict(new) if s["id"] == sid else s for s in x["shots"]]})
+    stamp, wrote = shots_inputs(p, brief), []
+
+    def put(x: dict) -> dict:
+        if expect is not None and next(s for s in x["shots"] if s["id"] == sid) != asdict(expect):
+            return x
+        wrote.append(True)
+        return x | {"inputs": stamp, "shots": [asdict(new) if s["id"] == sid else s for s in x["shots"]]}
+
+    update_json(p, p.shots_path, put)
+    return bool(wrote)
 
 
 def _judged_plan(p: Project, s: Shot):
@@ -104,6 +113,16 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
 
     def queued(job: str) -> JSONResponse:
         return JSONResponse({"job": job}, 202)
+
+    def paid(p: Project, j, name: str, shown: float, price: Callable[[], float], fn: Callable[[], object]) -> JSONResponse:
+        """Checked at the click, and again when the job starts: jobs queued behind it may have spent meanwhile."""
+        check(p, shown, price())
+
+        def go() -> None:
+            check(p, shown, price())  # refused here it is a job error, with nothing spent
+            fn()
+
+        return queued(j.paid(name, go))
 
     @r.put("/brief")
     async def put_brief(pid: str, request: Request) -> dict:
@@ -139,14 +158,14 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
         for sid in sids:
             _shot(p, sid)
         _brief(p)
-        check(p, shown, prices(p)["still"] * IDEAS_PER_WINDOW * len(sids))  # every idea priced as a footage still
 
         def go() -> None:
             ru = run(p)
             for sid in sids:
                 suggest.shots(ru, sid, steer)
 
-        return queued(j.paid(f"suggest shots {', '.join(sids)}", go))
+        # every idea priced as a footage still
+        return paid(p, j, f"suggest shots {', '.join(sids)}", shown, lambda: prices(p)["still"] * IDEAS_PER_WINDOW * len(sids), go)
 
     @r.post("/shots/{sid}/use")
     async def use_shot(pid: str, sid: str, request: Request) -> dict:
@@ -160,8 +179,9 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
         b = await _body(request)
         near, shown = _get(b, "near_seed", (int, type(None)), None), _price(b)
         compose(_shot(p, sid, "footage"), _brief(p))  # a prompt that is too long is refused before any spend
-        check(p, shown, prices(p)["keyframe_set"])
-        return queued(j.paid(f"suggest keyframes {sid}", lambda: suggest.keyframes(run(p), sid, near)))
+        return paid(
+            p, j, f"suggest keyframes {sid}", shown, lambda: prices(p)["keyframe_set"], lambda: suggest.keyframes(run(p), sid, near)
+        )
 
     @r.post("/keyframes/{sid}/use")
     async def use_keyframe(pid: str, sid: str, request: Request) -> dict:
@@ -217,7 +237,8 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
 
         def rewrite() -> None:
             new = auto.rewrite_shot(chat_factory(p)[0], s, _brief(p), reason)
-            _save_shot(p, sid, asdict(new))
+            if not _save_shot(p, sid, asdict(new), expect=s):
+                log.info("%s: edited since the rejection; the edit is the rewrite", sid)
 
         return queued(j.free(f"rewrite {sid}", rewrite))
 
@@ -231,16 +252,13 @@ def make_router(get: Callable, gen_factory: Callable, chat_factory: Callable) ->
         p, j = get(pid)
         b = await _body(request)
         shown, only = _price(b), _get(b, "only", (list, type(None)), None)
+        if not all(isinstance(x, str) for x in only or ()):
+            raise ValueError("only: expected a list of shot ids")
         if unknown := set(only or ()) - {s.id for s in p.load_shots() or []}:
             raise ValueError(f"no shot {', '.join(sorted(map(str, unknown)))}")
-        check(p, shown, prices(p)["continue"])
         text, vision = chat_factory(p)
-        return queued(
-            j.paid(
-                "continue",
-                lambda: advance(p, gen_factory(), text, vision, confirm=lambda c: c <= shown + 0.01, only=set(only or ()) or None),
-            )
-        )
+        go = lambda: advance(p, gen_factory(), text, vision, confirm=lambda c: c <= shown + 0.01, only=set(only or ()) or None)
+        return paid(p, j, "continue", shown, lambda: prices(p)["continue"], go)
 
     @r.post("/assemble")
     async def assemble(pid: str):

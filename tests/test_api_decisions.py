@@ -7,7 +7,7 @@ from celery_man.generate import FakeGenerator
 from celery_man.ledger import Ledger
 from celery_man.pipeline import advance, held_run_lock, run_lock
 from celery_man.project import DEFAULT_MODES, read_json, write_json
-from celery_man.steps import ensure_open_shots
+from celery_man.steps import EST_STILL_S, STILL_MODEL, ensure_open_shots
 from celery_man.web.app import create_app
 from tests.test_api_core import decided, wait_jobs
 from tests.test_pipeline import BRIEF, make, text_chat, vision_chat
@@ -186,28 +186,32 @@ def test_assemble_route_makes_video(tmp_path, song):
 
 
 class SlowGen(FakeGenerator):
-    go = threading.Event()
-    started = threading.Event()
+    """Holds the paid worker in stills until go is set; wall_s: what each still is charged (the fake's own is 1 s)."""
+
+    def __init__(self, wall_s=None):
+        super().__init__()
+        self.go, self.started, self.wall_s = threading.Event(), threading.Event(), wall_s
 
     def stills(self, jobs):
-        SlowGen.started.set()
-        assert SlowGen.go.wait(20)
-        return super().stills(jobs)
+        self.started.set()
+        assert self.go.wait(20)
+        return (r | {"wall_s": self.wall_s or r["wall_s"]} for r in super().stills(jobs))
 
 
 def test_decision_while_paid_job_runs(tmp_path, song):
     p = decided(tmp_path, song)
-    c = client(p.root, gen=SlowGen)
+    slow = SlowGen()
+    c = client(p.root, gen=lambda: slow)
     price = c.get(f"{U}/state").json()["prices"]["keyframe_set"]
     try:
         assert c.post(f"{U}/suggest/keyframes/s01", json={"price": price}).status_code == 202
-        assert SlowGen.started.wait(20)
+        assert slow.started.wait(20)
         s = shot(c)
         assert c.put(f"{U}/shots/s01", json={"shot": s | {"action": "a person sits"}}).status_code == 200
         assert c.get(f"{U}/state").json()["jobs"]["running"] is not None
         assert p.load_shots()[0].action == "a person sits"
     finally:
-        SlowGen.go.set()
+        slow.go.set()
     assert wait_jobs(c, "proj")["jobs"]["errors"] == []
 
 
@@ -218,3 +222,51 @@ def test_nested_held_run_lock_keeps_outer_marker(tmp_path, song):
             pass
         with run_lock(p):  # still ours: the inner exit must not drop the outer holder's marker
             pass
+
+
+def test_queued_paid_job_rechecks_reserve(tmp_path, song):
+    p = decided(tmp_path, song)
+    gen = SlowGen(wall_s=EST_STILL_S)  # charged as estimated, so the first set really uses up the room
+    gen.go.set()
+    c = client(p.root, gen=lambda: gen)
+    st = c.get(f"{U}/state").json()
+    price = st["prices"]["keyframe_set"]
+    write_json(p.root / "project.json", p.config | {"cap_usd": st["spend"]["spent"] + st["spend"]["reserve"] + 1.5 * price})
+    hold = threading.Event()
+    c.app.state.jobs["proj"].paid("hold", lambda: hold.wait(20))  # the worker is busy, so both clicks queue
+    try:
+        for _ in range(2):  # each fits at the click: nothing is spent yet
+            assert c.post(f"{U}/suggest/keyframes/s01", json={"price": price}).status_code == 202
+    finally:
+        hold.set()
+    errors = wait_jobs(c, "proj")["jobs"]["errors"]
+    assert len(errors) == 1 and errors[0]["name"] == "suggest keyframes s01" and errors[0]["error"].startswith("OverReserve")
+    assert sum(r.get("model") == STILL_MODEL for r in Ledger(p.ledger_path).rows()) == 4
+
+
+def test_rewrite_skipped_when_shot_edited_meanwhile(tmp_path, song):
+    p = with_takes(tmp_path, song)
+    asked, go = threading.Event(), threading.Event()
+
+    def slow_chat(system, user, images):
+        asked.set()
+        assert go.wait(20)
+        return text_chat(system, user, images)
+
+    c = client(p.root, chats=lambda p: (slow_chat, no_chat))
+    try:
+        assert c.post(f"{U}/takes/s01/reject", json={"reason": "morphing"}).status_code == 202
+        assert asked.wait(20)
+        assert c.put(f"{U}/shots/s01", json={"shot": shot(c) | {"action": "a person sits"}}).status_code == 200
+    finally:
+        go.set()
+    assert wait_jobs(c, "proj")["jobs"]["errors"] == []
+    assert p.load_shots()[0].action == "a person sits"
+
+
+def test_continue_only_must_be_ids(tmp_path, song):
+    p = decided(tmp_path, song)
+    c = client(p.root)
+    price = c.get(f"{U}/state").json()["prices"]["continue"]
+    for bad in ([1], [["s01"]], [None], "s01"):
+        assert c.post(f"{U}/continue", json={"price": price, "only": bad}).status_code == 422, bad
