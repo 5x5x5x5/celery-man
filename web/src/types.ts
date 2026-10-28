@@ -53,7 +53,7 @@ export interface Shot {
   place: string | null;
   framing: string;
   kind: Kind | "open";
-  scene: { template?: string; file?: string; params: Record<string, unknown> } | null;
+  scene: { template?: string; file?: string; params: Record<string, unknown>; note?: string } | null;
 }
 
 export interface Pick {

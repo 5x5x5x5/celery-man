@@ -62,3 +62,18 @@ select, input[type="number"], input[type="color"], textarea { border: 1px solid 
 .dropzone { border: 1px dashed var(--muted); padding: .75rem; border-radius: 3px; }
 .dropzone.over { border-color: var(--accent); background: var(--card); }
 .takecard video, .stills img { width: 100%; }
+.stage { aspect-ratio: 960 / 544; position: relative; overflow: hidden; display: grid; place-items: center; border: 1px solid var(--rule); }
+.stage video, .stage img { width: 100%; height: 100%; object-fit: cover; }
+.stage .preview { width: 100%; }
+.stage p { font-size: 1.6rem; text-align: center; padding: 1rem; margin: 0; }
+.cutstrip { display: flex; gap: 2px; margin-top: .4rem; }
+.cutstrip button { flex-basis: 0; min-width: 1.5rem; padding: .15rem .2rem; font-size: .75em; border-color: var(--rule); overflow: hidden; border-radius: 0; background: var(--open); }
+.cutstrip .take, .cutstrip .render { background: var(--footage); color: #fff; }
+.cutstrip .still { background: var(--animation); color: #fff; }
+.cutstrip .card, .cutstrip .blank { background: var(--open); }
+.cutstrip .here { outline: 2px solid var(--ink); }
+.dock { position: sticky; bottom: 0; background: var(--paper); border-top: 1px solid var(--rule); padding: .5rem 1.25rem; }
+.dock .player { max-width: 24rem; }
+.dots i { display: inline-block; width: .5em; height: .5em; border-radius: 50%; margin-left: 2px; border: 1px solid currentColor; }
+.dots i.auto { background: currentColor; }
+.bigplayer .player { max-width: 40rem; }

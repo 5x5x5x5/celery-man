@@ -4,6 +4,8 @@ import { playWindow, useSongTime } from "../clock";
 import { InPoint } from "../InPoint";
 import { apiMode, loadView, ModeSwitch, saveView } from "../ModeSwitch";
 import type { View } from "../ModeSwitch";
+import type { Override } from "../roughcut";
+import { tryProps, useTryInPlace } from "../TryInPlace";
 import { PricedButton } from "../PricedButton";
 import { ShotForm } from "../ShotForm";
 import { ShotStrip } from "../ShotStrip";
@@ -11,8 +13,9 @@ import { Upload } from "../Upload";
 import type { ShotState, ShotTake, State } from "../types";
 
 /** Shows the clip at in + (t - start) while the song plays inside the shot's window, so it stays on the song. */
-export function TakeCard({ src, start, window: win, inPoint, onIn, children }: {
+export function TakeCard({ src, start, window: win, inPoint, onIn, tryout, children }: {
   src: string;
+  tryout?: Override;
   start: number;
   window: number;
   inPoint: number;
@@ -22,11 +25,12 @@ export function TakeCard({ src, start, window: win, inPoint, onIn, children }: {
   const v = useRef<HTMLVideoElement>(null);
   const [dur, setDur] = useState(0);
   const t = useSongTime();
+  const { setOverride } = useTryInPlace();
   useEffect(() => {
     if (v.current && dur) v.current.currentTime = inPoint + (t >= start && t < start + win ? t - start : 0);
   }, [t, inPoint, dur, start, win]);
   return (
-    <article className="card takecard">
+    <article className="card takecard" {...tryProps(setOverride, tryout ?? null)}>
       <video ref={v} src={src} muted preload="auto" onLoadedMetadata={(e) => setDur(e.currentTarget.duration)} />
       {dur > 0 && <InPoint clipDuration={dur} window={win} value={inPoint} onChange={onIn} />}
       {children}
@@ -126,7 +130,7 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
             <>
               <div className="cards">
                 {t.takes.map((k: ShotTake) => (
-                  <TakeCard key={k.key} src={fileUrl(pid, k.clip)} start={cur.shot.start} window={win} inPoint={ins[k.key] ?? 0} onIn={(v) => setIns((m) => ({ ...m, [k.key]: v }))}>
+                  <TakeCard key={k.key} src={fileUrl(pid, k.clip)} start={cur.shot.start} window={win} inPoint={ins[k.key] ?? 0} tryout={{ shot: sid, item: { kind: "take", src: k.clip, in: ins[k.key] ?? 0 } }} onIn={(v) => setIns((m) => ({ ...m, [k.key]: v }))}>
                     <div className="row">
                       <button className="primary" onClick={() => guard(() => pickTake(pid, sid, k.key, ins[k.key] ?? 0))}>
                         {t.pick?.key === k.key ? "Chosen" : "Use"}

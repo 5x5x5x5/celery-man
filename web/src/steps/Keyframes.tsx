@@ -6,6 +6,7 @@ import type { View } from "../ModeSwitch";
 import { PricedButton } from "../PricedButton";
 import { ShotForm } from "../ShotForm";
 import { ShotStrip } from "../ShotStrip";
+import { tryProps, useTryInPlace } from "../TryInPlace";
 import { Upload } from "../Upload";
 import type { Shot, ShotState, State } from "../types";
 
@@ -26,6 +27,7 @@ const badge = (s?: ShotState) => {
 export function Keyframes({ state, refresh, initial }: { state: State; refresh: () => void; initial?: string | null }) {
   const { project: p, brief, prices } = state;
   const pid = p.id;
+  const { setOverride } = useTryInPlace();
   const footage = state.shots.filter((s) => s.shot.kind === "footage");
   const [sel, setSel] = useState<string | null>(initial ?? null);
   const [views, setViews] = useState<Record<string, View>>({});
@@ -128,7 +130,7 @@ export function Keyframes({ state, refresh, initial }: { state: State; refresh: 
               )}
               <div className="cards stills">
                 {stills.map((s) => (
-                  <article className="card" key={s.id}>
+                  <article className="card" key={s.id} {...tryProps(setOverride, { shot: sid, item: { kind: "still", src: s.path } })}>
                     <img src={fileUrl(pid, s.path)} alt="" />
                     {s.flag && <span className="badge error">{s.flag}</span>}
                     <div className="row">

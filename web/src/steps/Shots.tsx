@@ -104,6 +104,11 @@ export function Shots({ state, refresh, initial }: { state: State; refresh: () =
                 steer={steer}
                 onSteer={setSteer}
                 onUse={(id) => guard(() => useShot(pid, cur.shot.id, id))}
+                tryout={(it) =>
+                  it.shot.kind === "animation"
+                    ? { shot: cur.shot.id, item: { kind: "render" }, candidate: it.id }
+                    : it.still ? { shot: cur.shot.id, item: { kind: "still", src: it.still } } : null
+                }
                 onEdit={(id) => {
                   const it = ideas.find((i) => i.id === id)!;
                   setDraft({ shot: it.shot, code: it.code });

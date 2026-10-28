@@ -31,6 +31,12 @@ export function playWindow(start: number, end: number, loop: boolean): void {
   raf = requestAnimationFrame(watch);
 }
 
+export const seek = (t: number): void => {
+  song().currentTime = t;
+};
+
+export const isPlaying = (): boolean => !song().paused;
+
 export const pause = (): void => {
   stopWatch?.();
   song().pause();

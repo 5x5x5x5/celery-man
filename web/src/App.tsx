@@ -4,6 +4,9 @@ import { ContinueButton } from "./PricedButton";
 import { JobsBadge } from "./JobsBadge";
 import { SpendMeter } from "./SpendMeter";
 import { StepStrip } from "./StepStrip";
+import { RoughCut } from "./RoughCut";
+import { TryInPlaceProvider } from "./TryInPlace";
+import { Cut } from "./steps/Cut";
 import { Brief } from "./steps/Brief";
 import { Keyframes } from "./steps/Keyframes";
 import { Takes } from "./steps/Takes";
@@ -46,7 +49,7 @@ function Projects() {
 function ProjectView({ pid, step, shot }: { pid: string; step: Step; shot: string | null }) {
   const { state, error, refresh } = useProject(pid);
   return (
-    <>
+    <TryInPlaceProvider>
       <header className="bar">
         <a href="#/">Projects</a>
         <strong>{pid}</strong>
@@ -64,9 +67,11 @@ function ProjectView({ pid, step, shot }: { pid: string; step: Step; shot: strin
         {state && step === "shots" && <Shots state={state} refresh={refresh} initial={shot} />}
         {state && step === "keyframes" && <Keyframes state={state} refresh={refresh} initial={shot} />}
         {state && step === "takes" && <Takes state={state} refresh={refresh} initial={shot} />}
-        {state && !["song", "brief", "shots", "keyframes", "takes"].includes(step) && <p className="muted">The {step} step is not built yet.</p>}
+        {state && step === "cut" && <Cut state={state} refresh={refresh} />}
+        {state && !["song", "brief", "shots", "keyframes", "takes", "cut"].includes(step) && <p className="muted">The {step} step is not built yet.</p>}
       </main>
-    </>
+      {state && step !== "cut" && <RoughCut state={state} />}
+    </TryInPlaceProvider>
   );
 }
 
