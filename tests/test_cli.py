@@ -112,3 +112,11 @@ def test_new_kinds(tmp_path, song):
     assert Project(tmp_path / "a").kinds == ["footage", "animation"]
     assert cli.main(["new", str(tmp_path / "b"), "--song", str(song), "--kinds", "cartoon"]) == 2
     assert not (tmp_path / "b").exists()
+
+
+def test_cli_modes_per_shot(tmp_path, song):
+    d = tmp_path / "p"
+    Project.create(d, song, "tone")
+    assert cli.main(["modes", str(d), "keyframes=auto", "s05.takes=auto"]) == 0
+    assert Project(d).mode("keyframes") == "auto" and Project(d).mode("takes", "s05") == "auto"
+    assert cli.main(["modes", str(d), "s05.brief=auto"]) == 2

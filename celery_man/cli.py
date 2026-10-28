@@ -18,6 +18,7 @@ from celery_man.timing import TimingError
 
 log = logging.getLogger("celery_man")
 DECISIONS = ("brief", "shots", "keyframes", "takes")
+PER_SHOT = ("shots", "keyframes", "takes")
 MODES = ("tastemaker", "auto")
 # exit 2: the project or the user must change something first (bad project files raise ValueError); exit 1: a run failed
 REFUSED = (BudgetError, TimingError, PromptTooLong, AutoError, WaitingError, BusyError, NoProject, ValueError, EOFError)
@@ -70,15 +71,26 @@ def _new(a) -> int:
 
 
 def _modes(a) -> int:
-    new = {}
+    new, per_shot = {}, {}
     for kv in a.pairs:
-        step, _, mode = kv.partition("=")
-        if step not in DECISIONS or mode not in MODES:
-            log.error("bad %r: steps are %s, modes are %s", kv, "/".join(DECISIONS), "/".join(MODES))
+        key, _, mode = kv.partition("=")
+        sid, dot, step = key.rpartition(".")
+        if mode not in MODES or step not in (PER_SHOT if dot else DECISIONS) or (dot and not sid):
+            log.error(
+                "bad %r: use STEP=MODE (steps %s) or SID.STEP=MODE (steps %s); modes are %s",
+                kv,
+                "/".join(DECISIONS),
+                "/".join(PER_SHOT),
+                "/".join(MODES),
+            )
             return 2
-        new[step] = mode
+        if dot:
+            per_shot.setdefault(sid, {})[step] = mode
+        else:
+            new[step] = mode
     p = Project(a.dir)
-    write_json(p.root / "project.json", p.config | {"modes": p.modes | new})
+    sm = {k: v | per_shot.get(k, {}) for k, v in p.shot_modes.items()} | {k: v for k, v in per_shot.items() if k not in p.shot_modes}
+    write_json(p.root / "project.json", p.config | {"modes": p.modes | new, "shot_modes": sm})
     return 0
 
 
