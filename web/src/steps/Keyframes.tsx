@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { continueRun, fileUrl, noKeyframe, putShot, putShotModes, suggestKeyframes, uploadKeyframe, useKeyframe } from "../api";
+import { approveKeyframe, continueRun, fileUrl, noKeyframe, putShot, putShotModes, redoKeyframe, suggestKeyframes, uploadKeyframe, useKeyframe } from "../api";
 import { playWindow } from "../clock";
 import { apiMode, loadView, ModeSwitch, saveView } from "../ModeSwitch";
 import type { View } from "../ModeSwitch";
@@ -104,6 +104,12 @@ export function Keyframes({ state, refresh, initial }: { state: State; refresh: 
             />
           )}
           {kf.entry && <img src={fileUrl(pid, kf.entry.path)} alt="current still" style={{ maxWidth: "24rem", width: "100%" }} />}
+          {kf.need === "judge" && (
+            <div className="row">
+              <button className="primary" onClick={() => guard(() => approveKeyframe(pid, sid))}>Approve</button>
+              <button onClick={() => guard(() => redoKeyframe(pid, sid))}>Redo</button>
+            </div>
+          )}
           {view === "auto" && <p className="muted">{typeof kf.entry?.note === "string" ? kf.entry.note : "The model will pick this still when you continue."}</p>}
           {view === "suggestions" && (
             <>
@@ -154,7 +160,7 @@ export function Keyframes({ state, refresh, initial }: { state: State; refresh: 
               />
               <PricedButton
                 label="Generate one"
-                price={prices.still}
+                price={cur.price}
                 onConfirm={async (shown) => {
                   const r = await continueRun(pid, shown, [sid]);
                   refresh();

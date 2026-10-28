@@ -99,6 +99,8 @@ export interface ShotState {
   render: { need: "gen" | "failed" | "done"; clip: string | null; poster: string | null; error: string | null } | null;
   keyframe: { need: "gen" | "judge" | "done"; entry: KeyframeEntry | null; changed_since_upload: boolean; prompt: string; prompt_error: string } | null;
   takes: ShotTakes | null;
+  /** What Continue on this shot alone would spend now. */
+  price: number;
 }
 
 export interface StepState {

@@ -83,6 +83,9 @@ export const suggestKeyframes = (pid: string, sid: string, price: number, near_s
   paid(`${base(pid)}/suggest/keyframes/${sid}`, { price, near_seed });
 export const useKeyframe = (pid: string, sid: string, id: string) =>
   json<object>("POST", `${base(pid)}/keyframes/${sid}/use`, { id });
+/** A generated still awaiting approval: approve it, or redo it (the next Continue makes a new one). */
+export const approveKeyframe = (pid: string, sid: string) => json<object>("POST", `${base(pid)}/keyframes/${sid}/approve`);
+export const redoKeyframe = (pid: string, sid: string) => json<object>("POST", `${base(pid)}/keyframes/${sid}/redo`);
 export const noKeyframe = (pid: string, sid: string, note: string) => json<object>("POST", `${base(pid)}/keyframes/${sid}/none`, { note });
 export const uploadKeyframe = (pid: string, sid: string, file: File) => {
   const d = new FormData();

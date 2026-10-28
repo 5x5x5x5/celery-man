@@ -44,7 +44,7 @@ export const roundLabel = (t: { landed_round: number; cap: number | null }): str
 const running = (s: ShotState, busy: boolean, names: string[]) => busy && (s.takes?.need === "run" || names.some((n) => n.includes(s.shot.id)));
 
 export function Takes({ state, refresh, initial }: { state: State; refresh: () => void; initial?: string | null }) {
-  const { project: p, brief, prices, jobs } = state;
+  const { project: p, brief, jobs } = state;
   const pid = p.id;
   const footage = state.shots.filter((s) => s.shot.kind === "footage");
   const [sel, setSel] = useState<string | null>(initial ?? null);
@@ -102,7 +102,7 @@ export function Takes({ state, refresh, initial }: { state: State; refresh: () =
   const nextRound = (
     <PricedButton
       label="Next round"
-      price={prices.take_round}
+      price={cur?.price ?? 0}
       disabledReason={t?.need === "limit" ? "round cap reached" : undefined}
       onConfirm={async (shown) => {
         const r = await continueRun(pid, shown, [sid]);

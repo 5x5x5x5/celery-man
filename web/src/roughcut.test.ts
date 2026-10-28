@@ -23,6 +23,7 @@ const sh = (id: string, kind: "footage" | "animation", extra: Record<string, unk
   modes: { shots: "auto", keyframes: "auto", takes: "auto" },
   keyframe: null,
   takes: null,
+  price: 0,
   ...extra,
   ...(extra.shot ? { shot: { id, kind, scene: null, ...(extra.shot as object) } } : {}),
 });
