@@ -512,3 +512,15 @@ def test_unusable_round_two_tastemaker_rejected_not_quick(tmp_path, song):
     run_auto(p, gen)
     pick = read_json(p.picks_path)["s01"]
     assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and pick["rejected"] is True and pick["round"] == 2 and not pick.get("quick")
+
+
+def test_cold_start_spend_does_not_stop_a_confirmed_continue(tmp_path, song):
+    class ColdGen(CountingGen):
+        def stills(self, jobs):  # real Modal: a cold start bills far past the estimate
+            return [r | {"wall_s": 20 * EST_STILL_S} for r in super().stills(jobs)]
+
+    p, seen = make(tmp_path, song), []
+    advance(p, CountingGen(), text_chat, vision_chat(), confirm=lambda c: False)  # brief and shots, nothing spent
+    shown = estimate(p)
+    sts = advance(p, ColdGen(), text_chat, vision_chat(), confirm=lambda c: seen.append(c) or c <= shown + 0.01)
+    assert set(states(sts).values()) == {"done"} and len(seen) == 2 and seen[1] == pytest.approx(shown)

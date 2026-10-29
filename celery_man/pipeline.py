@@ -216,6 +216,14 @@ def _preflight(p: Project, led: Ledger, need: float) -> None:
 Confirm = Callable[[float], bool]
 
 
+def _at_estimate(rows: list[dict]) -> float:
+    """These job rows priced as estimate() priced them, so a cold start's extra seconds never read as a price rise."""
+    jobs = [r for r in rows if r.get("kind") == "job" and r.get("model") != steps.RESERVE_MODEL]
+    n_still = sum(r.get("model") == steps.STILL_MODEL for r in jobs)
+    # every other row is a take or its run's overhead row, the "+1" load that estimate() adds
+    return cost(n_still, steps.EST_STILL_S, steps.STILL_GPU) + cost(len(jobs) - n_still, steps.EST_WALL_S, steps.TAKE_GPU)
+
+
 def quick(
     p: Project, gen: Generator, chat_text: ChatFn | None = None, confirm: Confirm | None = None, renderer: Renderer | None = None
 ) -> Path:
@@ -270,13 +278,14 @@ def advance(
     """Run steps in order until everything is done or waiting, a timing or brief decision is missing, or a step cannot finish.
     A per-shot step waiting on some shots is passed over, so the other shots move ahead; assemble runs once all else is done or waiting per shot (it fills those windows).
     only limits the per-shot runners to those shot ids.
-    confirm gets, before every spending step, what this call has spent so far plus the estimate for the rest (the brief and
-    shots exist by then); False stops there, so a call never spends past the price confirmed at its first spend."""
+    confirm gets, before every spending step, what this call has generated so far at estimated prices plus the estimate for the
+    rest (the brief and shots exist by then); False stops there, so a call never generates past the price confirmed at its first
+    spend. The cap and reserve checks still see actual spend."""
     run = steps.Run(p, gen, chat_text, chat_vision, renderer, only)
     with run_lock(p), run.stack:
         if p.timing_path.exists():
             steps.ensure_open_shots(p)
-        sts, checked, start = status(p, only), False, run.led.spent_usd()
+        sts, checked, n0 = status(p, only), False, len(run.led.rows())
         for _ in range(MAX_PASSES):
             i = next((i for i, s in enumerate(sts) if s.state != "done" and not (s.state == "waiting" and s.per_shot)), None)
             if i is None or sts[i].state == "waiting":
@@ -286,7 +295,7 @@ def advance(
             log.info("advance: %s (%s)", sts[i].step, sts[i].state)
             if sts[i].step in SPENDING:
                 # an auto rejection can loop back to a new still and round: confirm before each spend, not only the first
-                if confirm and not confirm(est := run.led.spent_usd() - start + estimate(p, only)):
+                if confirm and not confirm(est := _at_estimate(run.led.rows()[n0:]) + estimate(p, only)):
                     log.info("advance: stopped before spending ($%.2f declined)", est)
                     return status(p)
                 if not checked:  # once per call, before the first spend
