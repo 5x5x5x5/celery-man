@@ -41,6 +41,33 @@ def _confidence(downbeats: list[float]) -> float:
     return round(float(steady.mean()), 4)
 
 
+def _track_bars(beats: list[float], downbeats: list[float], duration: float) -> list[float]:
+    """Downbeats re-laid one median bar apart across the song, each snapped to a detected downbeat within 10% of a bar, else to a
+    beat within 6% (busy beat tracks sit off the bar line). The grid starts at the earliest detected downbeat it agrees with most, so stray extra and missed downbeats drop out."""
+    d, b = np.asarray(downbeats), np.asarray(beats)
+    bar = float(np.median(np.diff(d)))
+    if bar <= 0:
+        return downbeats
+
+    def snap(t: float) -> tuple[float, int]:
+        for xs, hit, tol in ((d, 1, 0.1), (b, 0, 0.06)):
+            if len(xs) and abs((x := float(xs[np.abs(xs - t).argmin()])) - t) <= tol * bar:
+                return x, hit
+        return t, 0
+
+    def lay(start: float) -> tuple[int, list[float]]:
+        out, hits = [start], 0
+        for step in (bar, -bar):
+            t = start
+            while 0 <= t + step <= duration:
+                t, h = snap(t + step)
+                out.append(t)
+                hits += h
+        return hits, sorted(out)
+
+    return max((lay(float(s)) for s in d), key=lambda g: g[0])[1]
+
+
 def build_timing(beats, downbeats, duration, sections, song_sha) -> dict:
     beats, downbeats = [_r(b) for b in beats], [_r(d) for d in downbeats]
     return {
@@ -131,6 +158,10 @@ def detect(song: Path) -> dict:
         raise TimingError(f"found {len(downbeats)} downbeats in {song.name}; the song has no steady pulse")
     y, sr = librosa.load(song, sr=22050, mono=True)
     duration = len(y) / sr
+    # without the DBN the detector's downbeats wander on real mixes (extras, gaps) while its beats hold; re-lay the bars
+    if (raw := _confidence(downbeats)) < CONFIDENCE_MIN:
+        downbeats = _track_bars(beats, downbeats, duration)
+        log.info("timing: downbeats re-laid on a bar grid (confidence %.2f -> %.2f)", raw, _confidence(downbeats))
     sections = _sections(y, sr, beats, downbeats, duration)
     log.info("timing: %d beats, %d downbeats, %d sections in %.1fs", len(beats), len(downbeats), len(sections), duration)
     return build_timing(beats, downbeats, duration, sections, hashlib.sha256(song.read_bytes()).hexdigest()[:12])

@@ -3,7 +3,7 @@ import itertools
 import numpy as np
 import pytest
 
-from celery_man.timing import MAX_WINDOW_S, TimingError, build_timing, plan_windows
+from celery_man.timing import CONFIDENCE_MIN, MAX_WINDOW_S, TimingError, _confidence, _track_bars, build_timing, plan_windows
 
 
 def grid(bpm: float, bars: int, t0: float = 0.0, per_bar: int = 4) -> tuple[list[float], list[float]]:
@@ -88,6 +88,17 @@ def test_low_confidence_raises():
     assert t["confidence"] < 0.8
     with pytest.raises(TimingError, match="steady pulse"):
         plan_windows(t)
+
+
+def test_track_bars_drops_stray_and_fills_missed_downbeats():
+    # a real mix through the detector: steady beats, but downbeats with extras half a beat late, gaps and jitter
+    rng = np.random.default_rng(0)
+    beats, bars = grid(103, 30, t0=0.3)
+    seen = sorted([b + rng.uniform(-0.03, 0.03) for i, b in enumerate(bars) if i % 5 != 3] + [bars[i] + 0.29 for i in (2, 9, 17, 24)])
+    assert _confidence(seen) < CONFIDENCE_MIN
+    tracked = _track_bars(beats, seen, beats[-1])
+    assert tracked == pytest.approx(bars, abs=0.04)
+    assert _confidence(tracked) >= CONFIDENCE_MIN
 
 
 @pytest.mark.slow
