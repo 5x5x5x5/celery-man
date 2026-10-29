@@ -9,8 +9,8 @@ from celery_man.assemble import probe_duration
 from celery_man.generate import FakeGenerator
 from celery_man.ledger import GPU_PRICE, Ledger
 from celery_man.pipeline import advance, estimate, status
-from celery_man.project import Brief, CastMember, Place, Project, Shot, read_json, sha12, write_json
-from celery_man.steps import EST_STILL_S, EST_WALL_S
+from celery_man.project import DEFAULT_MODES, Brief, CastMember, Place, Project, Shot, open_shot, read_json, sha12, update_json, write_json
+from celery_man.steps import EST_STILL_S, EST_WALL_S, shots_inputs, windows
 from celery_man.timing import plan_windows
 
 ALL_AUTO = {"brief": "auto", "shots": "auto", "keyframes": "auto", "takes": "auto"}
@@ -363,3 +363,152 @@ def test_hand_edited_shot_windows_are_stale(tmp_path, song):
     del d["shots"][-1]
     write_json(p.shots_path, d)
     assert "7 shots" in {s.step: s for s in status(p)}["shots"].detail
+
+
+# --- per-shot progression ---------------------------------------------------------------------------
+
+
+def status_of(p, step):
+    return {s.step: s for s in status(p)}[step]
+
+
+def saved_brief(p):
+    brief = Brief("l", BRIEF["style"], [CastMember("A", "a tall person")], [Place("P", "a room")], [])
+    p.save_brief(brief, sha12("a seed"))
+    return brief
+
+
+def decide(p, brief, ids):
+    """Shots file with the given ids decided as footage and the rest open."""
+    shots = [
+        Shot(f"s{i:02d}", a, b, s, f"a person walks s{i:02d}", ["A"], "P", "wide shot")
+        if f"s{i:02d}" in ids
+        else open_shot(f"s{i:02d}", a, b, s)
+        for i, (a, b, s) in enumerate(windows(p), 1)
+    ]
+    p.save_shots(shots, shots_inputs(p, brief))
+
+
+def with_shot_modes(p, shot_modes):
+    write_json(p.root / "project.json", p.config | {"shot_modes": shot_modes})
+
+
+def test_timing_writes_open_shots(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    advance(p, FakeGenerator())
+    assert all(s.is_open for s in p.load_shots()) and len(p.load_shots()) == len(windows(p))
+    assert read_json(p.shots_path)["inputs"] == ""
+    assert status_of(p, "shots").state == "waiting"  # on the brief
+
+
+def test_decided_shot_gets_keyframe_while_others_open(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01"})
+    with_shot_modes(p, {"s01": {"keyframes": "auto"}})
+    advance(p, FakeGenerator(), chat_vision=vision_chat())
+    kfs = read_json(p.keyframes_path)
+    assert set(kfs) == {"s01"} and kfs["s01"]["approved"] is True and status_of(p, "shots").state == "waiting"
+    assert status_of(p, "takes").state == "waiting"  # s01's takes ran and wait on a pick
+
+
+def test_auto_window_filled_tastemaker_left_open(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    saved_brief(p)
+    with_shot_modes(p, {"s02": {"shots": "auto"}})
+    advance(p, FakeGenerator(), chat_text=text_chat)
+    shots = {s.id: s for s in p.load_shots()}
+    assert not shots["s02"].is_open and shots["s01"].is_open
+    assert [s.id for s in shots.values() if not s.is_open] == ["s02"]
+    assert status_of(p, "shots").state == "waiting"
+
+
+def test_only_limits_runners(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01", "s02"})
+    advance(p, FakeGenerator(), only={"s01"})
+    assert set(read_json(p.keyframes_path)) == {"s01"}
+
+
+def test_concurrent_keyframe_write_survives(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01", "s02"})
+    advance(p, FakeGenerator(), only={"s02"})
+
+    class ApprovingGen(FakeGenerator):
+        def stills(self, jobs):
+            update_json(p, p.keyframes_path, lambda d: d | {"s02": d["s02"] | {"approved": True}})
+            return super().stills(jobs)
+
+    advance(p, ApprovingGen())
+    kfs = read_json(p.keyframes_path)
+    assert kfs["s02"]["approved"] is True and kfs["s01"]["approved"] is None
+
+
+def test_only_moves_its_shot_past_others_needs(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01", "s02"})
+    with_shot_modes(p, {"s01": {"keyframes": "auto"}})
+    advance(p, FakeGenerator(), chat_vision=vision_chat(), only={"s01"})
+    assert set(read_json(p.keyframes_path)) == {"s01"} and len(take_rows(p, "s01")) == 3
+    assert status_of(p, "keyframes").state == "stale"  # the full status still sees s02
+
+
+def test_stale_shots_file_stops_advance_before_spending(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01"})
+    write_json(p.shots_path, read_json(p.shots_path) | {"inputs": "bogus"})
+    with_shot_modes(p, {"s01": {"keyframes": "auto"}})
+    gen = CountingGen()
+    sts = advance(p, gen, chat_vision=vision_chat())
+    assert states(sts)["shots"] == "waiting" and gen.stills_n == gen.clips_n == []
+
+
+def test_takes_wait_on_a_pending_tastemaker_keyframe(tmp_path, song):
+    p = make(tmp_path, song, DEFAULT_MODES)
+    decide(p, saved_brief(p), {"s01"})
+    advance(p, FakeGenerator())
+    assert read_json(p.keyframes_path)["s01"]["approved"] is None
+    st = status_of(p, "takes")
+    assert st.state == "waiting" and "s01 keyframe" in st.detail
+
+
+# --- round cap: auto stops at 2, a tastemaker does not -------------------------------------------------
+
+
+def _rejected_twice_then_edited(tmp_path, song, takes_mode):
+    """s01 has rounds 1 and 2 in the ledger, round 2 rejected; the shot is then edited and the pipeline advanced."""
+    p = make(tmp_path, song)
+    run_auto(p, reject={"s01"})
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2]
+    write_json(p.picks_path, read_json(p.picks_path) | {"s01": {"rejected": True, "gen": 1, "round": 2, "reason": "bad"}})
+    write_json(p.root / "project.json", p.config | {"modes": ALL_AUTO | {"takes": takes_mode}})
+    d = read_json(p.shots_path)
+    d["shots"][0]["action"] = "a person sits"
+    write_json(p.shots_path, d)
+    return p, run_auto(p)
+
+
+def test_tastemaker_round_three_runs(tmp_path, song):
+    p, _ = _rejected_twice_then_edited(tmp_path, song, "tastemaker")
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2, 3]
+
+
+def test_auto_round_three_is_limit(tmp_path, song):
+    p, sts = _rejected_twice_then_edited(tmp_path, song, "auto")
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and status_of_sts(sts, "takes").detail == "s01: pick a round-2 take"
+
+
+def status_of_sts(sts, step):
+    return {s.step: s for s in sts}[step]
+
+
+def test_unusable_round_two_tastemaker_rejected_not_quick(tmp_path, song):
+    p = make(tmp_path, song, ALL_AUTO | {"takes": "tastemaker"})
+    gen = CountingGen(junk_takes={"s01"})
+    run_auto(p, gen)
+    d = read_json(p.shots_path)
+    d["shots"][0]["action"] = "a person sits"
+    write_json(p.shots_path, d)
+    run_auto(p, gen)
+    pick = read_json(p.picks_path)["s01"]
+    assert Ledger(p.ledger_path).rounds("s01") == [1, 2] and pick["rejected"] is True and pick["round"] == 2 and not pick.get("quick")

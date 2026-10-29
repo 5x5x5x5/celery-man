@@ -4,9 +4,12 @@ import itertools
 import logging
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+FONTS = Path(__file__).parent / "scenes" / "fonts"
 
 
 class ClipTooShort(ValueError):
@@ -67,3 +70,35 @@ def contact_sheet(clip: Path | str, dest: Path) -> Path:
         check=True,
     )  # fmt: skip
     return dest
+
+
+def _filler(vf: str, seconds: float, out: Path, source: list[str], fps: int = 24) -> Path:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp.mp4")
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", *source, "-vf", vf, "-frames:v", str(round(seconds * fps)), "-r", str(fps),
+         "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp)],
+        check=True,
+    )  # fmt: skip
+    tmp.replace(out)
+    return out
+
+
+def still_clip(png: Path, seconds: float, out: Path, fps: int = 24, w: int = 960, h: int = 544) -> Path:
+    """A slow push-in from 1.0 to 1.06 over a still."""
+    n = max(round(seconds * fps), 1)
+    vf = f"scale={w * 2}:{h * 2},zoompan=z='1+0.06*on/{n}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d={n}:s={w}x{h}:fps={fps},setsar=1"
+    return _filler(vf, seconds, out, ["-i", str(png)], fps)
+
+
+def card_clip(text: str, look: dict, seconds: float, out: Path, fps: int = 24, w: int = 960, h: int = 544) -> Path:
+    """The look's background with the text centred in its first colour; empty text is a blank card."""
+    source = ["-f", "lavfi", "-i", f"color=c={look['background']}:s={w}x{h}:r={fps}"]
+    if not text.strip():
+        return _filler("setsar=1", seconds, out, source, fps)
+    with tempfile.TemporaryDirectory() as tmp:
+        textfile = Path(tmp) / "text.txt"
+        textfile.write_text(textwrap.fill(text, 36))  # a textfile, never inline: quotes and colons need no escaping
+        vf = (f"drawtext=fontfile={FONTS / (look['typeface'] + '.ttf')}:textfile={textfile}:expansion=none:fontsize=34:"
+              f"fontcolor={look['colors'][0]}:x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=10,setsar=1")  # fmt: skip
+        return _filler(vf, seconds, out, source, fps)

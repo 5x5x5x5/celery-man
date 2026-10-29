@@ -4,7 +4,7 @@
   const FACES = { serif: "Source Serif 4", sans: "Inter", mono: "JetBrains Mono", display: "Archivo Black" };
   // FontFace, not a <style> @font-face: the CSP has no style-src, so inline styles are blocked
   for (const [file, family] of Object.entries(FACES)) {
-    document.fonts.add(new FontFace(family, `url(fonts/${file}.ttf)`, file === "display" ? {} : { weight: "100 900" }));
+    document.fonts.add(new FontFace(family, `url(${(window.__FONTS || {})[file] || "fonts/" + file + ".ttf"})`, file === "display" ? {} : { weight: "100 900" }));
   }
   const realNow = performance.now.bind(performance); // captured before pinning, for the frame limit
   let now = 0;
@@ -32,13 +32,15 @@
     Math.random = random;
     const look = { ...p.look, typeface: FACES[p.look.typeface] || FACES.serif };
     env = { params: p.params, look, width: p.width, height: p.height, fps: p.fps, duration: p.duration, random, __realNow: realNow };
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "scene.js";
-      s.onload = resolve;
-      s.onerror = () => reject(new Error("scene.js failed to load"));
-      document.body.appendChild(s);
-    });
+    if (typeof window.setup !== "function" || typeof window.draw !== "function") { // the preview inlines the scene
+      await new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "scene.js";
+        s.onload = resolve;
+        s.onerror = () => reject(new Error("scene.js failed to load"));
+        document.body.appendChild(s);
+      });
+    }
     if (typeof window.setup !== "function" || typeof window.draw !== "function") {
       throw new Error("scene must define setup(env) and draw(ctx, f, env)");
     }
@@ -47,10 +49,14 @@
     await window.setup(env);
   };
 
-  window.__frame = (i, f) => {
+  window.__draw = (f) => {
     now = f.song_t * 1000;
-    const t0 = realNow();
     window.draw(ctx, f, env);
+  };
+
+  window.__frame = (i, f) => {
+    const t0 = realNow();
+    window.__draw(f);
     const ms = realNow() - t0;
     if (ms > limitMs) throw new Error(`frame ${i} took ${Math.round(ms)} ms`);
     return canvas.toDataURL("image/jpeg", 0.92);

@@ -1,6 +1,9 @@
+import threading
+from dataclasses import asdict
+
 import pytest
 
-from celery_man.project import Project, Shot, brief_from_dict, read_json, sha12, shot_from_dict, write_json
+from celery_man.project import Project, Shot, brief_from_dict, open_shot, read_json, sha12, shot_from_dict, update_json, write_json
 
 BRIEF = {
     "logline": "a person walks",
@@ -181,3 +184,28 @@ def test_kinds_enter_shots_stamp_only_when_not_default(tmp_path, song):
     assert steps.shots_inputs(p, brief) == old
     write_json(p.root / "project.json", p.config | {"kinds": ["footage", "animation"]})
     assert steps.shots_inputs(p, brief) != old
+
+
+def test_open_shot_round_trips():
+    s = open_shot("s01", 0.0, 2.5, "intro")
+    assert s.is_open and shot_from_dict(asdict(s)) == s
+
+
+def test_open_shot_rejects_content():
+    with pytest.raises(ValueError):
+        shot_from_dict(asdict(open_shot("s01", 0, 1, "x")) | {"action": "a person walks"})
+
+
+def test_mode_prefers_shot_override(tmp_path, song):
+    p = Project.create(tmp_path / "p", song, "src")
+    write_json(p.root / "project.json", p.config | {"shot_modes": {"s02": {"takes": "auto"}}})
+    assert p.mode("takes") == "tastemaker" and p.mode("takes", "s02") == "auto" and p.mode("takes", "s03") == "tastemaker"
+
+
+def test_update_json_serialises_writers(tmp_path, song):
+    p = Project.create(tmp_path / "p", song, "src")
+    path = p.root / "k.json"
+    threads = [threading.Thread(target=update_json, args=(p, path, lambda d, i=i: (d or {}) | {str(i): i})) for i in range(20)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(read_json(path)) == 20

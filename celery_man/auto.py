@@ -23,6 +23,14 @@ JSON_ONLY = "Reply with JSON only, no prose."
 CRAFT = f"Craft rules: {FOOTAGE_RULES} {JSON_ONLY}"
 
 
+BRIEF_RULES = (
+    CRAFT + " Keys: logline (str), style (object with "
+    f"{', '.join(STYLE_KEYS)}, all strings), cast ([{{name, description}}], short names), places ([{{name, description}}]), "
+    f"avoid ([str]), look ({{background: #rrggbb, colors: [1 to 5 #rrggbb], typeface: one of {'|'.join(TYPEFACES)}}}). "
+    "Descriptions are visual and self-contained."
+)
+
+
 class AutoError(RuntimeError):
     pass
 
@@ -78,93 +86,96 @@ def _lenient_brief(d: Any) -> Any:
 
 
 def write_brief(chat_fn: ChatFn, seed: str) -> Brief:
-    system = (
-        "You write a creative brief for a short music video. " + CRAFT + " Keys: logline (str), style (object with "
-        f"{', '.join(STYLE_KEYS)}, all strings), cast ([{{name, description}}], short names), places ([{{name, description}}]), "
-        f"avoid ([str]), look ({{background: #rrggbb, colors: [1 to 5 #rrggbb], typeface: one of {'|'.join(TYPEFACES)}}}). "
-        "Descriptions are visual and self-contained."
-    )
+    system = "You write a creative brief for a short music video. " + BRIEF_RULES
     user = f"Seed: {seed}" if seed.strip() else "No seed given: invent the theme freely."
     return ask_json(chat_fn, system, user, [], lambda d: brief_from_dict(_lenient_brief(d)))
 
 
-def write_shots(
-    chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]], kinds: list[str]
-) -> tuple[list[Shot], dict[str, str]]:
-    """The shots, and {shot id: code} for custom animation scenes (their scene file is not written here)."""
-    ids = [f"s{i:02d}" for i in range(1, len(windows) + 1)]
-    plan = [{"id": i, "start": w[0], "end": w[1], "section": w[2]} for i, w in zip(ids, windows)]
+def _shot_rules(kinds: list[str], items: str) -> str:
+    """The reply rules for a JSON list of shot objects; items says how many ("one object per id")."""
     if kinds == ["footage"]:
-        system = (
-            "You plan the shots of a music video, one per window. " + CRAFT + " Reply with a JSON list with one object per id: "
+        return (
+            f"{CRAFT} Reply with a JSON list with {items}: "
             "{id, action, cast ([names]), place (name or null), framing}. Do not change or add windows."
         )
-    else:
-        from celery_man.auto_scene import CONTRACT, catalogue_text  # auto_scene imports this module
+    from celery_man.auto_scene import CONTRACT, catalogue_text  # auto_scene imports this module
 
-        both = "footage" in kinds
-        system = (
-            f"You plan the shots of a music video, one per window. {JSON_ONLY} "
-            f"Reply with a JSON list with one object per id: {{id, kind ({' or '.join(kinds)}), action, ...}}. "
-            + (
-                f"Craft rules for footage shots only: {FOOTAGE_RULES} A footage shot adds cast ([names]), place (name or null), framing. "
-                if both
-                else ""
-            )
-            + ("Every shot is an animation shot, drawn by code, not filmed: no cast, place or framing. " if not both else "")
-            + "An animation shot adds either template (a name below) and params (object, omitted params take their defaults; type text "
-            "goes in params), or code (a whole custom scene); action says what the viewer sees. "
-            'Example animation shot: {"id": "s01", "kind": "animation", "action": "what the viewer sees, one sentence", '
-            '"template": "rings", "params": {}}. '
-            f"Do not change or add windows.\nTemplates:\n{catalogue_text()}\n{CONTRACT}"
+    both = "footage" in kinds
+    return (
+        f"{JSON_ONLY} Reply with a JSON list with {items}: {{id, kind ({' or '.join(kinds)}), action, ...}}. "
+        + (
+            f"Craft rules for footage shots only: {FOOTAGE_RULES} A footage shot adds cast ([names]), place (name or null), framing. "
+            if both
+            else ""
         )
-    user = f"Brief: {_brief_text(brief)}\nWindows: {json.dumps(plan)}"
-    cast, places = {c.name for c in brief.cast}, {p.name for p in brief.places}
+        + ("Every shot is an animation shot, drawn by code, not filmed: no cast, place or framing. " if not both else "")
+        + "An animation shot adds either template (a name below) and params (object, omitted params take their defaults; type text "
+        "goes in params), or code (a whole custom scene); action says what the viewer sees. "
+        'Example animation shot: {"id": "s01", "kind": "animation", "action": "what the viewer sees, one sentence", '
+        '"template": "rings", "params": {}}. '
+        f"Do not change or add windows.\nTemplates:\n{catalogue_text()}\n{CONTRACT}"
+    )
 
-    def animation(i, w, d, codes) -> Shot:
-        if not isinstance(d.get("action"), str) or not d["action"]:
-            raise ValueError(f"{i}: action must be a non-empty string")
-        if "code" in d:
-            if not isinstance(d["code"], str) or not d["code"].strip():
-                raise ValueError(f"{i}: code must be a non-empty string")
-            codes[i] = d["code"]
-            scene = {"file": f"scenes/{i}.js", "params": {}}
-        else:
-            params = d.get("params") or {}
-            if not isinstance(d.get("template"), str) or not isinstance(params, dict):
-                raise ValueError(f"{i}: an animation shot needs template (a name) and params (an object), or code")
-            try:
-                scene = {"template": d["template"], "params": templates.validate_params(d["template"], params)}
-            except ValueError as e:
-                raise ValueError(f"{i}: {e}") from e
-        return Shot(i, w[0], w[1], w[2], d["action"], [], None, "", "animation", scene)
 
-    def one(i, w, d, codes) -> Shot:
-        kind = d.get("kind", "footage") if kinds != ["animation"] else "animation"  # a lone kind needs no label; small models mangle it
-        if kind not in kinds:
-            raise ValueError(f"{i}: kind {kind!r} is not allowed (allowed: {', '.join(kinds)})")
-        if kind == "animation":
-            return animation(i, w, d, codes)
-        c, p = d.get("cast"), d.get("place")
-        if isinstance(c, str):
-            c = [c]
-        if isinstance(p, str) and p.strip().lower() in ("", "none", "null"):
-            p = None
-        if not isinstance(c, list) or not all(isinstance(x, str) for x in c):
-            raise ValueError(f"{i}: cast must be a list of names")
-        for x in c:
-            if x not in cast:
-                raise ValueError(f"{i}: unknown cast '{x}' (known: {', '.join(sorted(cast))})")
-        if p is not None and (not isinstance(p, str) or p not in places):
-            raise ValueError(f"{i}: place must be a name or null (known: {', '.join(sorted(places))})")
-        if not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
-            raise ValueError(f"{i}: action and framing must be non-empty strings")
-        shot = Shot(i, w[0], w[1], w[2], d["action"], c, p, d["framing"])
+def _animation(i: str, w: tuple[float, float, str], d: dict, codes: dict[str, str]) -> Shot:
+    if not isinstance(d.get("action"), str) or not d["action"]:
+        raise ValueError(f"{i}: action must be a non-empty string")
+    if "code" in d:
+        if not isinstance(d["code"], str) or not d["code"].strip():
+            raise ValueError(f"{i}: code must be a non-empty string")
+        codes[i] = d["code"]
+        scene = {"file": f"scenes/{i}.js", "params": {}}
+    else:
+        params = d.get("params") or {}
+        if not isinstance(d.get("template"), str) or not isinstance(params, dict):
+            raise ValueError(f"{i}: an animation shot needs template (a name) and params (an object), or code")
         try:
-            compose(shot, brief)
-        except PromptTooLong as e:
+            scene = {"template": d["template"], "params": templates.validate_params(d["template"], params)}
+        except ValueError as e:
             raise ValueError(f"{i}: {e}") from e
-        return shot
+    return Shot(i, w[0], w[1], w[2], d["action"], [], None, "", "animation", scene)
+
+
+def shot_from_reply(sid: str, window: tuple[float, float, str], d: dict, brief: Brief, kinds: list[str], codes: dict[str, str]) -> Shot:
+    """One shot from one reply object, for window; a custom scene's code goes into codes[sid] (scene file scenes/<sid>.js)."""
+    i, w = sid, window
+    kind = d.get("kind", "footage") if kinds != ["animation"] else "animation"  # a lone kind needs no label; small models mangle it
+    if kind not in kinds:
+        raise ValueError(f"{i}: kind {kind!r} is not allowed (allowed: {', '.join(kinds)})")
+    if kind == "animation":
+        return _animation(i, w, d, codes)
+    cast, places = {c.name for c in brief.cast}, {p.name for p in brief.places}
+    c, p = d.get("cast"), d.get("place")
+    if isinstance(c, str):
+        c = [c]
+    if isinstance(p, str) and p.strip().lower() in ("", "none", "null"):
+        p = None
+    if not isinstance(c, list) or not all(isinstance(x, str) for x in c):
+        raise ValueError(f"{i}: cast must be a list of names")
+    for x in c:
+        if x not in cast:
+            raise ValueError(f"{i}: unknown cast '{x}' (known: {', '.join(sorted(cast))})")
+    if p is not None and (not isinstance(p, str) or p not in places):
+        raise ValueError(f"{i}: place must be a name or null (known: {', '.join(sorted(places))})")
+    if not all(isinstance(d.get(k), str) and d[k] for k in ("action", "framing")):
+        raise ValueError(f"{i}: action and framing must be non-empty strings")
+    shot = Shot(i, w[0], w[1], w[2], d["action"], c, p, d["framing"])
+    try:
+        compose(shot, brief)
+    except PromptTooLong as e:
+        raise ValueError(f"{i}: {e}") from e
+    return shot
+
+
+def write_shots(
+    chat_fn: ChatFn, brief: Brief, windows: list[tuple[float, float, str]], kinds: list[str], ids: list[str] | None = None
+) -> tuple[list[Shot], dict[str, str]]:
+    """The shots, and {shot id: code} for custom animation scenes (their scene file is not written here).
+    ids name the windows (default s01..sNN), so a subset of windows keeps its own ids."""
+    ids = ids or [f"s{i:02d}" for i in range(1, len(windows) + 1)]
+    plan = [{"id": i, "start": w[0], "end": w[1], "section": w[2]} for i, w in zip(ids, windows)]
+    system = "You plan the shots of a music video, one per window. " + _shot_rules(kinds, "one object per id")
+    user = f"Brief: {_brief_text(brief)}\nWindows: {json.dumps(plan)}"
 
     def validate(data) -> tuple[list[Shot], dict[str, str]]:
         if isinstance(data, dict) and isinstance(data.get("shots"), list):
@@ -177,12 +188,67 @@ def write_shots(
         shots, codes, errs = [], {}, []
         for i, w in zip(ids, windows):
             try:
-                shots.append(one(i, w, by_id[i], codes))
+                shots.append(shot_from_reply(i, w, by_id[i], brief, kinds, codes))
             except ValueError as e:
                 errs.append(str(e))
         if errs:
             raise ValueError("; ".join(errs))
         return shots, codes
+
+    return ask_json(chat_fn, system, user, [], validate)
+
+
+def _ideas(data: Any, n: int, key: str) -> list:
+    """The reply as a list of exactly n items, unwrapping {key: [...]}."""
+    if isinstance(data, dict) and isinstance(data.get(key), list):
+        data = data[key]
+    if not isinstance(data, list) or len(data) != n:
+        raise ValueError(f"expected a JSON list of exactly {n} {key}")
+    return data
+
+
+def suggest_briefs(chat_fn: ChatFn, seed: str, steer: str, n: int = 3) -> list[Brief]:
+    """n different briefs to choose from, in one call."""
+    system = f"You write {n} different creative briefs for a short music video, as a JSON list of {n} objects. " + BRIEF_RULES
+    user = (f"Seed: {seed}" if seed.strip() else "No seed given: invent the theme freely.") + (f"\nSteer: {steer}" if steer.strip() else "")
+    return ask_json(chat_fn, system, user, [], lambda d: [brief_from_dict(_lenient_brief(x)) for x in _ideas(d, n, "briefs")])
+
+
+def suggest_shots(
+    chat_fn: ChatFn,
+    brief: Brief,
+    sid: str,
+    window: tuple[float, float, str],
+    kinds: list[str],
+    neighbours: list[Shot],
+    steer: str,
+    n: int = 3,
+) -> list[tuple[Shot, str | None]]:
+    """n different ideas for one window, each with its custom scene code or None."""
+    mix = " At least one idea is a footage shot and at least one an animation shot." if {"footage", "animation"} <= set(kinds) else ""
+    system = f"You offer {n} different ideas for one shot of a music video, all for window {sid}.{mix} " + _shot_rules(
+        kinds, f"{n} objects, all with id {sid}"
+    )
+    plan = {"id": sid, "start": window[0], "end": window[1], "section": window[2]}
+    user = (
+        f"Brief: {_brief_text(brief)}\nWindow: {json.dumps(plan)}\n"
+        f"Neighbouring shots: {json.dumps([{'id': s.id, 'kind': s.kind, 'action': s.action} for s in neighbours])}"
+        + (f"\nSteer: {steer}" if steer.strip() else "")
+    )
+
+    def validate(data) -> list[tuple[Shot, str | None]]:
+        out, errs = [], []
+        for k, d in enumerate(_ideas(data, n, "shots"), 1):
+            codes: dict[str, str] = {}
+            try:
+                if not isinstance(d, dict):
+                    raise TypeError(f"{sid}: idea {k} is not an object")
+                out.append((shot_from_reply(sid, window, d, brief, kinds, codes), codes.get(sid)))
+            except (ValueError, TypeError) as e:
+                errs.append(f"idea {k}: {e}")
+        if errs:
+            raise ValueError("; ".join(errs))
+        return out
 
     return ask_json(chat_fn, system, user, [], validate)
 

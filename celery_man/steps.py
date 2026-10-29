@@ -4,18 +4,18 @@ import hashlib
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from celery_man import auto, features
 from celery_man.animate import SCENES, ChromiumRenderer, Renderer
-from celery_man.assemble import assemble
-from celery_man.compose import compose, prompt_sha
+from celery_man.assemble import assemble, card_clip, still_clip
+from celery_man.compose import compose, prompt_sha_or_none
 from celery_man.generate import Generator, StillJob
 from celery_man.ledger import Ledger, cost, job_key
-from celery_man.project import Brief, Project, Shot, read_json, sha12, write_json
+from celery_man.project import DEFAULT_LOOK, OPEN, Brief, Project, Shot, open_shot, read_json, sha12, update_json, write_json
 from celery_man.timing import detect, plan_windows
 
 log = logging.getLogger(__name__)
@@ -55,12 +55,59 @@ def shots_inputs(p: Project, brief: Brief) -> str:
     return sha12(parts if p.kinds == ["footage"] else [*parts, sorted(p.kinds)])
 
 
+def shots_fresh(p: Project, brief: Brief, d: dict) -> bool:
+    """A shots.json written before the brief existed (inputs "") is fresh while every shot in it is still open."""
+    return d["inputs"] == shots_inputs(p, brief) or (d["inputs"] == "" and all(s.get("kind") == OPEN for s in d["shots"]))
+
+
+def shots_problem(p: Project, shots: list[Shot]) -> str:
+    """The first way a (hand-edited) shots.json departs from the planned windows or the allowed kinds, or ""."""
+    want = [(f"s{i:02d}", a, b) for i, (a, b, _) in enumerate(windows(p), 1)]
+    if len(shots) != len(want):
+        return f"shots.json has {len(shots)} shots, the windows need {len(want)}"
+    for s, (sid, a, b) in zip(shots, want):
+        if (s.id, s.start, s.end) != (sid, a, b):
+            return f"{s.id} is {s.start:.2f}-{s.end:.2f}s, window {sid} is {a:.2f}-{b:.2f}s"
+    for s in shots:
+        if not s.is_open and s.kind not in p.kinds:
+            return f"{s.id} is {s.kind}; this project allows {', '.join(p.kinds)}"
+    return ""
+
+
+def ensure_open_shots(p: Project, reset: bool = False) -> None:
+    """While no shot is decided, shots.json holds one open shot per window, rewritten when the windows (or brief names) change.
+    reset: reopen every shot, decided or not (a range or kinds change the tastemaker confirmed)."""
+    brief = p.load_brief()
+    want = {
+        "inputs": shots_inputs(p, brief) if brief else "",
+        "shots": [asdict(open_shot(f"s{i:02d}", a, b, sec)) for i, (a, b, sec) in enumerate(windows(p), 1)],
+    }
+
+    def fill(d: dict | None) -> dict:
+        return want if reset or d is None or all(s.get("kind") == OPEN for s in d["shots"]) else d
+
+    if fill(d := read_json(p.shots_path)) != d:  # nothing is rewritten unchanged
+        update_json(p, p.shots_path, fill)
+
+
+def merge_entry(p: Project, path: Path, sid: str, entry: dict) -> None:
+    """Write one shot's entry into a per-shot JSON map, keeping every other shot's entry as it is on disk now."""
+    update_json(p, path, lambda d: (d or {}) | {sid: entry})
+
+
 # --- per-shot needs --------------------------------------------------------------------------------
 
 
 def kf_need(p: Project, shot: Shot, brief: Brief, entry: dict | None) -> str:
-    """ "gen" (missing, stale or rejected), "judge" (approval pending) or "done"."""
-    if not entry or entry["prompt_sha"] != prompt_sha(shot, brief) or entry["approved"] is False or not (p.root / entry["path"]).exists():
+    """ "gen" (missing, stale or rejected), "judge" (approval pending) or "done". An uploaded keyframe stays done when the prompt moves."""
+    if entry and entry.get("uploaded") and (p.root / entry["path"]).exists():
+        return "done"
+    if (
+        not entry
+        or entry["prompt_sha"] != prompt_sha_or_none(shot, brief)
+        or entry["approved"] is False
+        or not (p.root / entry["path"]).exists()
+    ):
         return "gen"
     return "done" if entry["approved"] else "judge"
 
@@ -75,6 +122,7 @@ class Run:
     chat_text: auto.ChatFn | None = None
     chat_vision: auto.ChatFn | None = None
     renderer: Renderer | None = None
+    only: set[str] | None = None  # when set, the shots, render, keyframes and takes runners act only on these shot ids
     stack: ExitStack = field(default_factory=ExitStack)
     _open: bool = False
 
@@ -92,6 +140,9 @@ class Run:
         if self.renderer is None:
             self.renderer = ChromiumRenderer()
         return self.renderer
+
+    def wanted(self, shots: list[Shot]) -> list[Shot]:
+        return [s for s in shots if self.only is None or s.id in self.only]
 
     def chat(self, step: str, kind: str) -> auto.ChatFn:
         fn = self.chat_text if kind == "text" else self.chat_vision
@@ -126,6 +177,7 @@ def _write_bytes(dest: Path, data: bytes) -> None:
 def run_timing(run: Run) -> None:
     write_json(run.p.timing_path, detect(run.p.song))
     features.ensure(run.p)
+    ensure_open_shots(run.p)
 
 
 def run_brief(run: Run) -> None:
@@ -135,75 +187,113 @@ def run_brief(run: Run) -> None:
 def run_shots(run: Run) -> None:
     from celery_man import auto_scene  # auto_scene imports renders, which imports this module
 
-    brief, chat = run.p.load_brief(), run.chat("shots", "text")
-    shots, codes = auto.write_shots(chat, brief, windows(run.p), run.p.kinds)
-    shots = [auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s for s in shots]
-    run.p.save_shots(shots, shots_inputs(run.p, brief))
+    p = run.p
+    brief, d = p.load_brief(), read_json(p.shots_path)
+    if d is None or not shots_fresh(p, brief, d) or shots_problem(p, p.load_shots()):
+        chat = run.chat("shots", "text")
+        shots, codes = auto.write_shots(chat, brief, windows(p), p.kinds)
+        p.save_shots([auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s for s in shots], shots_inputs(p, brief))
+        return
+    todo = [s for s in run.wanted(p.load_shots()) if s.is_open and p.mode("shots", s.id) == "auto"]
+    if not todo:
+        return
+    chat = run.chat("shots", "text")
+    shots, codes = auto.write_shots(chat, brief, [(s.start, s.end, s.section) for s in todo], p.kinds, [s.id for s in todo])
+    new = {s.id: asdict(auto_scene.settle(chat, run, s, brief, codes[s.id]) if s.id in codes else s) for s in shots}
+    stamp = shots_inputs(p, brief)
+    # only windows still open on disk are filled: a person may have decided one meanwhile
+    update_json(
+        p, p.shots_path, lambda d: {"inputs": stamp, "shots": [new.get(x["id"], x) if x["kind"] == OPEN else x for x in d["shots"]]}
+    )
 
 
-def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:
-    """Generate keyframes into keys/ and keyframes.json; returns the shots whose still failed."""
+def gen_stills(run: Run, jobs: list[tuple[str, str, int]], landed: Callable[[int, Path], None] | None = None) -> list[Path | None]:
+    """Generate (shot id, prompt, seed) stills into keys/ with their ledger rows; a failed job gives None. keyframes.json is not
+    touched: landed(job index, path) runs as each still lands, so a caller can record it before the batch ends."""
     if not jobs:
         return []
-    p, led, failed = run.p, run.led, []
-    prompts = [compose(s, brief) for s, _ in jobs]
+    p, led, out = run.p, run.led, []
     p.keys_dir.mkdir(exist_ok=True)
     with led.locked():
         if not led.can_afford(cost(len(jobs), EST_STILL_S, STILL_GPU)):
             raise BudgetError(f"{len(jobs)} keyframes would pass the ${p.cap_usd} cap (spent ${led.spent_usd():.2f})")
         with reserved(led, STILL_GPU, EST_STILL_S * (len(jobs) + 1)):
-            results = run.generator().stills([StillJob(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)])
-            for (s, seed), pr, res in zip(jobs, prompts, results, strict=True):
-                row = {"key": job_key(s.id, seed, pr, b""), "shot": s.id, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
+            results = run.generator().stills([StillJob(sid, pr, seed) for sid, pr, seed in jobs])
+            for n, ((sid, pr, seed), res) in enumerate(zip(jobs, results, strict=True)):
+                row = {"key": job_key(sid, seed, pr, b""), "shot": sid, "round": 0, "seed": seed, "model": STILL_MODEL, "prompt": pr}
                 if isinstance(res, BaseException):
-                    log.error("keyframe %s failed: %r", s.id, res)
+                    log.error("keyframe %s failed: %r", sid, res)
                     led.append(_row(**row, keyframe="", output=None, gpu=STILL_GPU, wall_s=EST_STILL_S, failed=True, error=repr(res)))
-                    failed.append(s)
+                    out.append(None)
                     continue
-                dest = p.keys_dir / f"{s.id}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
+                dest = p.keys_dir / f"{sid}-{hashlib.sha256(res['png']).hexdigest()[:12]}.png"
                 _write_bytes(dest, res["png"])
                 led.append(_row(**row, keyframe="", output=str(dest.resolve()), gpu=res["gpu"], wall_s=res["wall_s"]))
-                kfs[s.id] = {
-                    "path": str(dest.relative_to(p.root)),
-                    "seed": seed,
-                    "prompt_sha": sha12(pr),
-                    "approved": approved,
-                    "note": note,
-                }
-                write_json(p.keyframes_path, kfs)  # each still is recorded as it lands, so a kill keeps the finished ones
-    return failed
+                out.append(dest)
+                if landed:
+                    landed(n, dest)
+    return out
+
+
+def _stills(run: Run, kfs: dict, jobs: list[tuple[Shot, int]], brief: Brief, approved: bool | None, note: str = "") -> list[Shot]:
+    """Generate keyframes into keys/ and keyframes.json; returns the shots whose still failed."""
+    prompts = [compose(s, brief) for s, _ in jobs]
+
+    def record(n: int, dest: Path) -> None:
+        (s, seed), pr = jobs[n], prompts[n]
+        kfs[s.id] = {"path": str(dest.relative_to(run.p.root)), "seed": seed, "prompt_sha": sha12(pr), "approved": approved, "note": note}
+        merge_entry(run.p, run.p.keyframes_path, s.id, kfs[s.id])  # each still is recorded as it lands, so a kill keeps the finished ones
+
+    paths = gen_stills(run, [(s.id, pr, seed) for (s, seed), pr in zip(jobs, prompts)], record)
+    return [s for (s, _), path in zip(jobs, paths) if path is None]
 
 
 def run_keyframes(run: Run) -> None:
     p = run.p
-    brief, shots, kfs = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}
-    auto_mode = p.modes["keyframes"] == "auto"
-    vision = run.chat("keyframes", "vision") if auto_mode else None
+    brief, shots, kfs = p.load_brief(), run.wanted(p.load_footage()), read_json(p.keyframes_path) or {}
+    picks = read_json(p.picks_path) or {}
+    shots = [s for s in shots if not (picks.get(s.id) or {}).get("uploaded")]  # an uploaded take needs no keyframe
+    auto_shots = [s for s in shots if p.mode("keyframes", s.id) == "auto"]
+    vision = run.chat("keyframes", "vision") if any(kf_need(p, s, brief, kfs.get(s.id)) != "done" for s in auto_shots) else None
     regen = [(s, kfs[s.id]["seed"] + 1 if s.id in kfs else 1) for s in shots if kf_need(p, s, brief, kfs.get(s.id)) == "gen"]
     _stills(run, kfs, regen, brief, approved=None)
-    if not auto_mode:
-        return
-    for s in shots:
+    for s in auto_shots:
         if kf_need(p, s, brief, kfs.get(s.id)) != "judge":
             continue
         ok, why = auto.check_keyframe(vision, s, brief, p.root / kfs[s.id]["path"])
         if ok:
             kfs[s.id] |= {"approved": True, "note": why}
-            write_json(p.keyframes_path, kfs)
+            merge_entry(p, p.keyframes_path, s.id, kfs[s.id])
             continue
         log.info("keyframe %s rejected (%s); regenerating once and accepting", s.id, why)
         if _stills(run, kfs, [(s, kfs[s.id]["seed"] + 1)], brief, approved=True, note=f"accepted after a rejected first still: {why}"):
             kfs[s.id] |= {"approved": False, "note": why}  # the retry failed: the next advance regenerates
-            write_json(p.keyframes_path, kfs)
+            merge_entry(p, p.keyframes_path, s.id, kfs[s.id])
+
+
+def _filler_clip(p: Project, item: dict, look: dict, fps: int = 24) -> Path:
+    """The cached still push-in, text card or blank card for one window."""
+    secs = (round(item["end"] * fps) - round(item["start"] * fps)) / fps
+    out = p.root / "fill" / f"{sha12([item['kind'], item['src'], item['text'], secs, look])}.mp4"
+    if out.exists():
+        return out
+    if item["kind"] == "still":
+        return still_clip(p.root / item["src"], secs, out)
+    return card_clip(item["text"], look, secs, out)
 
 
 def run_assemble(run: Run) -> None:
+    from celery_man.cut import cut_plan  # cut imports this module
+
     p = run.p
-    shots, picks, ren = p.load_shots(), read_json(p.picks_path) or {}, read_json(p.renders_path) or {}
-    src = {s.id: (ren[s.id]["clip"], 0) if s.kind == "animation" else (picks[s.id]["clip"], picks[s.id]["in"]) for s in shots}
-    cuts = [{"clip": str(p.root / src[s.id][0]), "in": src[s.id][1], "start": s.start, "end": s.end} for s in shots]
+    brief = p.load_brief()
+    look = brief.look if brief else DEFAULT_LOOK
+    cuts = []
+    for item in cut_plan(p):
+        clip = _filler_clip(p, item, look) if item["kind"] in ("still", "card", "blank") else p.root / item["src"]
+        cuts.append({"clip": str(clip), "in": item["in"], "start": item["start"], "end": item["end"]})
     p.out_dir.mkdir(exist_ok=True)
-    tmp = p.out_dir / "video.tmp.mp4"
+    tmp = p.out_dir / f"video.{os.getpid()}-{time.time_ns()}.tmp.mp4"
     assemble(cuts, p.song, tmp)
     os.replace(tmp, p.out_dir / "video.mp4")
     write_report(p, run.led)
@@ -216,6 +306,9 @@ def write_report(p: Project, led: Ledger) -> None:
     lines = ["# Report", "", f"Decided by: brief {m['brief']}, shots {m['shots']}, keyframes {m['keyframes']}, takes {m['takes']}.", ""]
     ren = read_json(p.renders_path) or {}
     for s in shots:
+        if s.is_open:
+            lines.append(f"- **{s.id}** (open window)")
+            continue
         if s.kind == "animation":
             sc, key = s.scene, ren.get(s.id, {}).get("key", "-")
             what = f"template `{sc['template']}`" if "template" in sc else f"file `{sc['file']}`"
@@ -225,16 +318,34 @@ def write_report(p: Project, led: Ledger) -> None:
         takes = [r for r in jobs if r["shot"] == s.id and r.get("model") == TAKE_MODEL]
         g = max((r["gen"] for r in takes), default=0)
         rounds = sorted({r["round"] for r in takes if r["gen"] == g}) or "-"
-        how = " (quick)" if pk.get("quick") else f" (round {MAX_ROUND}, forced)" if pk.get("round") == MAX_ROUND else ""
+        how = (
+            " (quick)"
+            if pk.get("quick")
+            else f" (round {MAX_ROUND}, forced)"
+            if pk.get("round") == MAX_ROUND and p.mode("takes", s.id) == "auto"
+            else ""
+        )
         pick = f"`{pk['key']}`{how}" if "key" in pk else "none"
         note = kfs.get(s.id, {}).get("note") or "-"
         lines.append(f"- **{s.id}** (footage): gen {g or '-'} rounds {rounds}; pick {pick}; failures {fails}; keyframe note: {note}")
+    from celery_man.cut import cut_plan  # cut imports this module
+
+    if filled := [c for c in cut_plan(p) if c["kind"] in ("still", "card", "blank")]:
+        lines += ["", "## Filled windows", ""] + [f"- **{c['shot']}**: {c['kind']}" for c in filled]
     if fell_back := [s.id for s in shots if picks.get(s.id, {}).get("quick")]:
         lines += ["", "## Quick fallback (cap reached)", "", "One unreviewed quick take each: " + ", ".join(fell_back)]
     if fell_back := [s.id for s in shots if s.scene and s.scene.get("note", "").startswith("fallback:")]:
         lines += ["", "## Scene fallbacks", "", "Custom scene failed, template used instead: " + ", ".join(fell_back)]
     lines += ["", f"Spend: ${led.spent_usd():.2f} of ${p.cap_usd:.2f} cap (ledger estimate; the Modal dashboard is the true spend).", ""]
     (p.out_dir / "report.md").write_text("\n".join(lines))
+
+
+def _uploads_line(p: Project) -> str:
+    kf, pk = read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}
+    keys = sorted(k for k, e in kf.items() if e.get("uploaded"))
+    clips = sorted(k for k, e in pk.items() if e.get("uploaded"))
+    parts = [f"{what} for {', '.join(ids)}" for what, ids in (("keyframes", keys), ("takes", clips)) if ids]
+    return f"- Supplied by the tastemaker: {'; '.join(parts)}\n" if parts else ""
 
 
 def write_provenance(p: Project) -> None:
@@ -249,5 +360,6 @@ def write_provenance(p: Project) -> None:
         f"- Clips: `{LTX}`, LTX-2.x Community License.\n"
         f"- Keyframes: `{FLUX}`, Apache-2.0.\n"
         f"- Song: {p.config['song_source']}\n"
+        f"{_uploads_line(p)}"
         f"- diffusers commit: `{DIFFUSERS_SHA}`\n" + fonts
     )

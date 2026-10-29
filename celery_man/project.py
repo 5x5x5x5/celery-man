@@ -1,16 +1,20 @@
 """Project folder model: file contracts, atomic JSON, validated decision records."""
 
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 STYLE_KEYS = ("medium", "palette", "lighting", "camera")
 KINDS = ("footage", "animation")
+OPEN = "open"  # a shot with timing only; stored in shots.json but not a generation kind
 TYPEFACES = ("serif", "sans", "mono", "display")
 DEFAULT_LOOK = {"background": "#f4efe6", "colors": ["#1d1b18"], "typeface": "serif"}
 SCENE_FILE = re.compile(r"^scenes/[A-Za-z0-9_-]+\.js$")
@@ -27,6 +31,15 @@ def write_json(path: Path, obj) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2))
     os.replace(tmp, path)
+
+
+def update_json(p: "Project", path: Path, fn: Callable[[Any], Any]) -> Any:
+    """Read-modify-write `path` under an exclusive lock; safe across threads and processes."""
+    with open(p.root / "decisions.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        new = fn(read_json(path))
+        write_json(path, new)
+        return new
 
 
 def read_json(path: Path):
@@ -68,6 +81,14 @@ class Shot:
     framing: str
     kind: str = "footage"
     scene: dict | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.kind == OPEN
+
+
+def open_shot(sid: str, start: float, end: float, section: str) -> Shot:
+    return Shot(sid, start, end, section, "", [], None, "", OPEN, None)
 
 
 @dataclass
@@ -156,10 +177,12 @@ def shot_from_dict(d) -> Shot:
     if isinstance(d, dict):
         d = {"kind": "footage", "scene": None} | d
     _exact(d, ("id", "start", "end", "section", "action", "cast", "place", "framing", "kind", "scene"), "shot")
-    if d["kind"] not in KINDS:
+    if d["kind"] not in (*KINDS, OPEN):
         raise ValueError(f"kind: expected one of {KINDS}, got {d['kind']!r}")
     if (d["kind"] == "animation") != (d["scene"] is not None):
         raise ValueError("scene: required for animation shots and not allowed on footage shots")
+    if d["kind"] == OPEN and (d["action"], d["cast"], d["place"], d["framing"]) != ("", [], None, ""):
+        raise ValueError("open shot: action, cast, place and framing must be empty")
     scene = None if d["scene"] is None else _scene(d["scene"])
     for k in ("id", "section", "action", "framing"):
         _is(d[k], str, k)
@@ -223,6 +246,13 @@ class Project:
     @property
     def modes(self) -> dict:
         return self.config["modes"]
+
+    @property
+    def shot_modes(self) -> dict:
+        return self.config.get("shot_modes", {})
+
+    def mode(self, step: str, shot_id: str | None = None) -> str:
+        return self.shot_modes.get(shot_id, {}).get(step) or self.modes[step]
 
     @property
     def cap_usd(self) -> float:

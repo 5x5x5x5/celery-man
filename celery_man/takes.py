@@ -1,10 +1,10 @@
-"""Takes: per-shot take plans (the 2-round lineage cap), the take batch runner, contact sheets and the takes step."""
+"""Takes: per-shot take plans (the 2-round lineage cap on auto shots), the take batch runner, contact sheets and the takes step."""
 
 import logging
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from celery_man import auto
@@ -12,7 +12,7 @@ from celery_man.assemble import contact_sheet
 from celery_man.compose import compose
 from celery_man.generate import ClipJob
 from celery_man.ledger import Ledger, cost, job_key
-from celery_man.project import Brief, Project, Shot, read_json, write_json
+from celery_man.project import Brief, Project, Shot, read_json, update_json
 from celery_man.steps import (
     EST_STILL_S,
     EST_WALL_S,
@@ -30,6 +30,7 @@ from celery_man.steps import (
     _row,
     _write_bytes,
     kf_need,
+    merge_entry,
     reserved,
     shots_inputs,
 )
@@ -54,26 +55,39 @@ def _h(key: str) -> str:
     return key.rsplit("-", 1)[1]  # the prompt+keyframe hash part of a job key; seeds differ per round
 
 
-def pick_ok(led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
+def pick_ok(p: Project, led: Ledger, pick: dict | None, prompt: str, kf: bytes) -> bool:
     if not pick or pick.get("rejected"):
         return False
+    if pick.get("uploaded"):
+        return (p.root / pick["clip"]).is_file()  # pinned: no ledger row, whatever the prompt says now
     row = led.done(pick["key"])
     return bool(row) and row["prompt"] == prompt and Path(row["keyframe"]).is_file() and Path(row["keyframe"]).read_bytes() == kf
 
 
+def round_cap(p: Project, sid: str) -> int | None:
+    """Auto shots stop at MAX_ROUND; a tastemaker decides when to stop paying for rounds."""
+    return MAX_ROUND if p.mode("takes", sid) == "auto" else None
+
+
 def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | None, pick: dict | None) -> TakePlan:
-    """Next takes for a shot. The 2-round cap is per pick lineage ("gen", R5), read from the current gen's take rows:
+    """Next takes for a shot. The 2-round cap on auto shots is per pick lineage ("gen", R5), read from the current gen's take rows:
 
     - the current prompt+keyframe hash matches the latest round's rows and that round was not rejected: resume that round;
     - that round was rejected: next round of the same gen (any edit made after a rejection is the rewrite);
-      round 2 with an unchanged hash is "edit" (not_rewritten), past round 2 is "limit";
+      a later round with an unchanged hash is "edit" (not_rewritten), past an auto shot's round 2 is "limit";
     - otherwise the shot changed (brief, shot or keyframe edit) without a rejection: a fresh gen at round 1.
     """
+    if pick and pick.get("uploaded") and pick_ok(p, led, pick, "", b""):
+        return TakePlan("done")
     if kf_need(p, shot, brief, entry) != "done":
         return TakePlan("run", missing=len(SEEDS))
-    prompt, kf_path = compose(shot, brief), p.root / entry["path"]
+    try:
+        prompt = compose(shot, brief)
+    except ValueError:  # a pinned upload whose shot names left the brief: the shot needs an edit before any take
+        return TakePlan("edit")
+    kf_path = p.root / entry["path"]
     kf = kf_path.read_bytes()
-    if pick_ok(led, pick, prompt, kf):
+    if pick_ok(p, led, pick, prompt, kf):
         return TakePlan("done")
     rows = [r for r in led.rows() if r.get("kind") == "job" and r.get("shot") == shot.id and r.get("model") == TAKE_MODEL]
     h = _h(job_key(shot.id, 0, prompt, kf))
@@ -87,8 +101,9 @@ def take_plan(p: Project, led: Ledger, shot: Shot, brief: Brief, entry: dict | N
     elif cur and not same:
         g, r = g + 1, 1
     plan = TakePlan("run", 0, r, prompt, kf, kf_path, gen=g)
-    if r > MAX_ROUND:
-        last = [x["key"] for x in cur if x["round"] == MAX_ROUND]
+    cap = round_cap(p, shot.id)
+    if cap and r > cap:
+        last = [x["key"] for x in cur if x["round"] == cap]
         plan.need, plan.missing = ("limit", 0) if any(led.done(k) and sheet(p, k) for k in last) else ("fallback", 1)
     elif r > 1 and h in {_h(x["key"]) for x in cur if x["round"] < r}:  # not_rewritten, from paper-machine direct.py
         plan.need = "edit"
@@ -169,33 +184,38 @@ def quick_takes(run: Run, shots: list[Shot], brief: Brief, kfs: dict) -> dict[st
 
 def _plans(run: Run) -> tuple[Brief, list[Shot], dict, dict[str, TakePlan]]:
     p = run.p
-    brief, shots, kfs, picks = p.load_brief(), p.load_footage(), read_json(p.keyframes_path) or {}, read_json(p.picks_path) or {}
+    brief, shots, kfs, picks = (
+        p.load_brief(),
+        run.wanted(p.load_footage()),
+        read_json(p.keyframes_path) or {},
+        read_json(p.picks_path) or {},
+    )
     return brief, shots, picks, {s.id: take_plan(p, run.led, s, brief, kfs.get(s.id), picks.get(s.id)) for s in shots}
 
 
 def _rewrite_rejected(run: Run) -> bool:
-    """Auto: rewrite every shot whose rejected round is unchanged; its keyframe goes stale, so advance loops back."""
+    """Auto shots: rewrite every one whose rejected round is unchanged; its keyframe goes stale, so advance loops back."""
+    p = run.p
     brief, shots, picks, plans = _plans(run)
-    edits = {s.id for s in shots if plans[s.id].need == "edit"}
-    if not edits:
-        return False
-    out = []
-    for s in run.p.load_shots():  # all shots: animation ones are saved back untouched
-        if s.id in edits:
-            new = auto.rewrite_shot(run.chat("takes", "text"), s, brief, picks.get(s.id, {}).get("reason", ""))
-            if new == s:
-                raise auto.AutoError(f"rewrite produced the same shot ({s.id})")
-            s = new
-        out.append(s)
-    run.p.save_shots(out, shots_inputs(run.p, brief))
-    return True
+    edits = [s for s in shots if plans[s.id].need == "edit" and p.mode("takes", s.id) == "auto"]
+    stamp = shots_inputs(p, brief)
+    for s in edits:
+        new = auto.rewrite_shot(run.chat("takes", "text"), s, brief, picks.get(s.id, {}).get("reason", ""))
+        if new == s:
+            raise auto.AutoError(f"rewrite produced the same shot ({s.id})")
+        update_json(
+            p,
+            p.shots_path,
+            lambda d, new=new: d | {"inputs": stamp, "shots": [asdict(new) if x["id"] == new.id else x for x in d["shots"]]},
+        )
+    return bool(edits)
 
 
 def _quick_picks(run: Run, shots: list[Shot], brief: Brief, plans: dict[str, TakePlan], picks: dict) -> None:
     for sid, key in quick_takes(run, shots, brief, read_json(run.p.keyframes_path)).items():
         picks[sid] = {"key": key, "clip": f"{run.p.takes_dir.name}/{key}.mp4", "in": IN_POINT, "round": 0, "gen": plans[sid].gen,
                       "quick": True}  # fmt: skip
-    write_json(run.p.picks_path, picks)
+        merge_entry(run.p, run.p.picks_path, sid, picks[sid])
 
 
 def _no_usable_take(run: Run) -> None:
@@ -205,20 +225,23 @@ def _no_usable_take(run: Run) -> None:
     dead = [s for s in shots if plans[s.id].need == "judge" and not any(sheet(run.p, k) for k, _ in plans[s.id].keys)]
     for s in dead:
         log.error("%s: no usable take in gen %d round %d", s.id, plans[s.id].gen, plans[s.id].round)
-        if plans[s.id].round < MAX_ROUND:
+        cap = round_cap(run.p, s.id)
+        if cap is None or plans[s.id].round < cap:
             picks[s.id] = {"rejected": True, "round": plans[s.id].round, "gen": plans[s.id].gen, "reason": "all takes unusable"}
-            write_json(run.p.picks_path, picks)
-    if last := [s for s in shots if plans[s.id].need == "fallback" or (s in dead and plans[s.id].round >= MAX_ROUND)]:
+            merge_entry(run.p, run.p.picks_path, s.id, picks[s.id])
+    if last := [
+        s for s in shots if plans[s.id].need == "fallback" or (s in dead and (cap := round_cap(run.p, s.id)) and plans[s.id].round >= cap)
+    ]:
         _quick_picks(run, last, brief, plans, picks)
 
 
 def run_takes(run: Run) -> None:
     p = run.p
-    auto_mode = p.modes["takes"] == "auto"
-    vision = run.chat("takes", "vision") if auto_mode else None
-    if auto_mode and _rewrite_rejected(run):
-        return
     brief, shots, picks, plans = _plans(run)
+    auto_ids = {s.id for s in shots if p.mode("takes", s.id) == "auto"}
+    vision = run.chat("takes", "vision") if any(plans[sid].todo or plans[sid].need == "judge" for sid in auto_ids) else None
+    if _rewrite_rejected(run):
+        return
     for s in shots:
         if plans[s.id].need == "limit":  # R6: per shot; the rest still run
             log.warning("%s: round %d refused; pick a round-2 take", s.id, plans[s.id].round)
@@ -226,7 +249,7 @@ def run_takes(run: Run) -> None:
     fallback = list({s.id: s for s, *_ in jobs}.values())
     # a round launches only if the quick fallback stays payable after it: one quick take per shot plus a load, and in
     # auto mode one still per shot for a rewrite after a rejection (otherwise a rejection can strand the video)
-    reserve = cost(len(fallback) + 1, EST_WALL_S, TAKE_GPU) + (cost(len(fallback), EST_STILL_S, STILL_GPU) if auto_mode else 0.0)
+    reserve = cost(len(fallback) + 1, EST_WALL_S, TAKE_GPU) + cost(sum(s.id in auto_ids for s in fallback), EST_STILL_S, STILL_GPU)
     if jobs and not run.led.can_afford(cost(len(jobs) + 1, EST_WALL_S, TAKE_GPU) + reserve):
         # the round won't fit: each unfinished shot gets one quick take, used as is, so the video still ships
         log.warning("cap reached: quick takes instead of the round for %s", ", ".join(s.id for s in fallback))
@@ -234,15 +257,13 @@ def run_takes(run: Run) -> None:
     elif jobs:
         _run_takes(run, jobs)
     _no_usable_take(run)
-    if not auto_mode:
-        return
     brief, shots, picks, plans = _plans(run)
     for s in shots:
         pl = plans[s.id]
-        if pl.need != "judge":
+        if pl.need != "judge" or s.id not in auto_ids:
             continue
         usable = [(k, sh) for k, _ in pl.keys if (sh := sheet(p, k))]  # never empty: _no_usable_take handled those
-        idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == MAX_ROUND)
+        idx, why = auto.pick_take(vision, s, brief, [sh for _, sh in usable], must_pick=pl.round == round_cap(p, s.id))
         if idx is None:
             picks[s.id] = {"rejected": True, "gen": pl.gen, "round": pl.round, "reason": why}
         else:
@@ -255,5 +276,5 @@ def run_takes(run: Run) -> None:
                 "round": pl.round,
                 "quick": False,
             }
-        write_json(p.picks_path, picks)
+        merge_entry(p, p.picks_path, s.id, picks[s.id])
     _rewrite_rejected(run)
